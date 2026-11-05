@@ -1,6 +1,8 @@
 //! `aisbx run` 编排:策略 -> SID -> ACL -> token -> Job -> broker -> 进程 -> 等待 -> 清理。
 
-use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+use windows_sys::Win32::System::JobObjects::{
+    QueryInformationJobObject, TerminateJobObject, JobObjectBasicProcessIdList,
+};
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
 use aisbx_policy::Policy;
@@ -88,10 +90,30 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     trace("stage9 wait-child");
     let code = child.wait_exit_code()?;
     trace("stage9b wait-job");
-    // 有限等待 + 兜底强杀:Job 内进程不收敛时避免无限挂起
-    const WAIT_TIMEOUT_CODE: u32 = 0x0000_0102;
-    if unsafe { WaitForSingleObject(jb.handle, 30_000) } == WAIT_TIMEOUT_CODE {
-        eprintln!("aisbx: 警告: Job 内进程 30s 未收敛,强制终止");
+    // 有限等待 + 兜底强杀:Job 内进程不收敛时避免无限挂起,并枚举残留 PID 供诊断
+    if unsafe { WaitForSingleObject(jb.handle, 5_000) } != 0 {
+        let mut buf = [0u8; 4096];
+        let mut ret: u32 = 0;
+        let ok = unsafe {
+            QueryInformationJobObject(
+                jb.handle,
+                JobObjectBasicProcessIdList,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+                Some(&mut ret),
+            )
+        };
+        if ok != 0 {
+            let n = usize::from_ne_bytes(buf[0..8].try_into().unwrap());
+            let mut pids = String::new();
+            for i in 0..n.min(16) {
+                let pid = usize::from_ne_bytes(buf[8 + i * 8..16 + i * 8].try_into().unwrap());
+                pids.push_str(&pid.to_string());
+                pids.push(' ');
+            }
+            eprintln!("aisbx: Job 内残留进程 {n} 个: {pids}");
+        }
+        eprintln!("aisbx: 警告: Job 内进程 5s 未收敛,强制终止");
         unsafe { TerminateJobObject(jb.handle, 1) };
     }
 

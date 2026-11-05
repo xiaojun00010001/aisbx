@@ -78,21 +78,22 @@ try {
   & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f2.txt" --access write
   Assert "T2a 无 token 提权被拒(deny 模式)" ($LASTEXITCODE -ne 0)
 
-  # T2b~T2e: 后台 run 保活 broker -> 宿主 authorize -> 沙箱内消费/写入/重放
+  # T2b~T2e: Start-Process 后台保活 broker -> 宿主 authorize -> 沙箱内消费/写入/重放
+  # 注:不用 Start-Job/Wait-Job(在 CI 中曾无界阻塞),改用进程句柄 WaitForExit(超时)
   $tokFile = Join-Path $ws "token.txt"
   Remove-Item $tokFile -ErrorAction SilentlyContinue
-  $job = Start-Job -ArgumentList $bin, $p1, $ws, $out, $tokFile -ScriptBlock {
-    param($b, $p, $w, $o, $tf)
-    & $b run -p $p -- "$w\burn.exe" flow $p $tf "$o\f2.txt" grant
-  }
-  Start-Sleep -Seconds 2
+  $flowOut = Join-Path $ws "flow.out"; $flowErr = Join-Path $ws "flow.err"
+  $proc = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+    -RedirectStandardOutput $flowOut -RedirectStandardError $flowErr `
+    -ArgumentList @('run', '-p', $p1, '--', "$ws\burn.exe", 'flow', $p1, $tokFile, "$out\f2.txt", 'grant')
+  Start-Sleep -Seconds 3
   $auth = (& $bin authorize -p $p1 --path $out --access write --ttl-seconds 120) | Out-String | ConvertFrom-Json
   Assert "T2b authorize 在 run 存活期签发 token" ($LASTEXITCODE -eq 0 -and $null -ne $auth.token -and $auth.token.Length -ge 32)
 
   Set-Content -Path $tokFile -Value $auth.token -Encoding ascii
-  Wait-Job $job -Timeout 60 | Out-Null
-  $r1 = (Receive-Job $job) 2>&1 | Out-String
-  Remove-Job $job -Force
+  if (-not $proc.WaitForExit(90000)) { $proc.Kill(); Write-Host "flow run 90s 未退出,已强杀" }
+  $r1 = @(Get-Content $flowOut, $flowErr -ErrorAction SilentlyContinue) -join "`n"
+  $r1 = $r1 | Out-String
   Write-Host ($r1.Trim())
   Assert "T2c 沙箱内消费 token 成功" ($r1 -match "escalate=0")
   Assert "T2d 授权后真实写入放行" (Test-Path "$out\f2.txt")
@@ -101,16 +102,16 @@ try {
   # T2f: 黑名单前置,token 也救不回 deny_escalation
   $tokFile2 = Join-Path $ws "token2.txt"
   Remove-Item $tokFile2 -ErrorAction SilentlyContinue
-  $job2 = Start-Job -ArgumentList $bin, $p1, $ws, $env:ProgramData, $tokFile2 -ScriptBlock {
-    param($b, $p, $w, $pd, $tf)
-    & $b run -p $p -- "$w\burn.exe" flow $p $tf "$pd\ssh" deny
-  }
-  Start-Sleep -Seconds 2
+  $flowOut2 = Join-Path $ws "flow2.out"; $flowErr2 = Join-Path $ws "flow2.err"
+  $proc2 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+    -RedirectStandardOutput $flowOut2 -RedirectStandardError $flowErr2 `
+    -ArgumentList @('run', '-p', $p1, '--', "$ws\burn.exe", 'flow', $p1, $tokFile2, "$env:ProgramData\ssh", 'deny')
+  Start-Sleep -Seconds 3
   $auth2 = (& $bin authorize -p $p1 --path "$env:ProgramData\ssh" --access write --ttl-seconds 60) | Out-String | ConvertFrom-Json
   Set-Content -Path $tokFile2 -Value $auth2.token -Encoding ascii
-  Wait-Job $job2 -Timeout 60 | Out-Null
-  $r2 = (Receive-Job $job2) 2>&1 | Out-String
-  Remove-Job $job2 -Force
+  if (-not $proc2.WaitForExit(90000)) { $proc2.Kill(); Write-Host "flow2 run 90s 未退出,已强杀" }
+  $r2 = @(Get-Content $flowOut2, $flowErr2 -ErrorAction SilentlyContinue) -join "`n"
+  $r2 = $r2 | Out-String
   Write-Host ($r2.Trim())
   Assert "T2f deny_escalation 优先于 token" ($r2 -match "escalate=(?!0)\d+")
 
