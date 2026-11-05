@@ -16,11 +16,14 @@ pub fn report() -> Value {
         json!({
             "backend": "windows",
             "contract": "B",
-            "effect": "in-place+retry",
+            "effect": "in-place(legacy)+agent-retry",
             "capabilities": {
                 "strategy": "full",
                 "denial_detection": "partial",
-                "authorized_retry": "full",
+                // v0.1 后端:授权后同进程即时放行;launcher 内 retry 事件未实现,
+                // agent 层可重跑命令,但 broker/token 生命周期跨 run 不延续。如实标注。
+                "authorized_retry": "partial",
+                "launcher_retry": "unavailable",
                 "file_isolation": "full",
                 "network_egress": "full",
                 "memory_per_process": "full",
@@ -105,7 +108,7 @@ pub fn require_full(report: &Value) -> Result<(), String> {
         .iter()
         .filter(|(k, v)| {
             v.as_str() == Some("unavailable")
-                && !matches!(k.as_str(), "auto_violation_capture" | "cpu" | "memory_total" | "landlock" | "bubblewrap" | "seatbelt" | "seccomp")
+                && !matches!(k.as_str(), "auto_violation_capture" | "cpu" | "memory_total" | "landlock" | "bubblewrap" | "seatbelt" | "seccomp" | "launcher_retry")
         })
         .map(|(k, _)| k.clone())
         .collect();
