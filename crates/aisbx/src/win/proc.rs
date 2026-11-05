@@ -28,6 +28,12 @@ pub fn spawn_suspended(
     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
+    // 指针必须绑定到存活变量:cwd_w 是 Vec,直接 .map(as_ptr) 会产生悬垂指针
+    let cwd_ptr = cwd_w
+        .as_ref()
+        .map(|c| c.as_ptr())
+        .unwrap_or(std::ptr::null());
+
     // CREATE_SUSPENDED:先挂起,Assign 进 Job 之后再恢复,保证无"漏网瞬间"
     let ok = unsafe {
         CreateProcessAsUserW(
@@ -39,7 +45,7 @@ pub fn spawn_suspended(
             0,
             CREATE_SUSPENDED,
             std::ptr::null(),
-            cwd_w.map(|c| c.as_ptr()).unwrap_or(std::ptr::null()),
+            cwd_ptr,
             &si,
             &mut pi,
         )
