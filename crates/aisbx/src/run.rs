@@ -91,9 +91,8 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     let code = child.wait_exit_code()?;
     trace("stage9b wait-job");
     // 有限等待 + 兜底强杀:Job 内进程不收敛时避免无限挂起,并枚举残留 PID 供诊断
-    let wr = unsafe { WaitForSingleObject(jb.handle, 5_000) };
+    let wr = unsafe { WaitForSingleObject(jb.handle, 2_000) };
     if wr != 0 {
-        eprintln!("aisbx: wait-job 返回 0x{wr:08X}");
         let mut buf = [0u8; 4096];
         let mut ret: u32 = 0;
         let ok = unsafe {
@@ -105,18 +104,20 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
                 &mut ret,
             )
         };
-        if ok != 0 {
-            let n = usize::from_ne_bytes(buf[0..8].try_into().unwrap());
+        let n = if ok != 0 { usize::from_ne_bytes(buf[0..8].try_into().unwrap()) } else { 0 };
+        if n == 0 {
+            // Job 已空但句柄未转 signaled:仅记录,无需强杀(KILL_ON_JOB_CLOSE 兜底)
+            eprintln!("aisbx: Job 已空但 wait 未触发(0x{wr:08X}),跳过强杀");
+        } else {
             let mut pids = String::new();
             for i in 0..n.min(16) {
                 let pid = usize::from_ne_bytes(buf[8 + i * 8..16 + i * 8].try_into().unwrap());
                 pids.push_str(&pid.to_string());
                 pids.push(' ');
             }
-            eprintln!("aisbx: Job 内残留进程 {n} 个: {pids}");
+            eprintln!("aisbx: 警告: Job 内残留进程 {n} 个({pids}),2s 未收敛,强制终止");
+            unsafe { TerminateJobObject(jb.handle, 1) };
         }
-        eprintln!("aisbx: 警告: Job 内进程 5s 未收敛,强制终止");
-        unsafe { TerminateJobObject(jb.handle, 1) };
     }
 
     // 10. 清理:撤 ACL、回收回环例外、关句柄(SID/token/Job 随对象废弃)

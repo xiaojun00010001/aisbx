@@ -47,14 +47,18 @@ pub fn start_server(policy: &Policy, package_sid: &str) -> Arc<AtomicBool> {
     let tokens2 = tokens.clone();
     let policy2 = policy.clone();
     std::thread::spawn(move || unsafe {
-        let _ = server_loop(&policy2, &sid, &stop2, &tokens2);
+        if let Err(e) = server_loop(&policy2, &sid, &stop2, &tokens2) {
+            eprintln!("aisbx: broker 授权管道异常: {e}");
+        }
     });
     // 宿主控制通道:agent 在运行中签发授权 token 的入口(见 docs/03 §1.5)
     let policy3 = policy.clone();
     let stop3 = stop.clone();
     let tokens3 = tokens.clone();
     std::thread::spawn(move || unsafe {
-        let _ = control_server_loop(&policy3, &stop3, &tokens3);
+        if let Err(e) = control_server_loop(&policy3, &stop3, &tokens3) {
+            eprintln!("aisbx: broker 控制管道异常: {e}");
+        }
     });
     stop
 }
@@ -432,7 +436,8 @@ pub fn escalate_client(policy: &Policy, path: &str, access: &str, token: &str) -
             0,
         );
         if h == INVALID_HANDLE_VALUE {
-            return Err(format!("无法连接授权管道 {name}(不在沙箱内或 broker 未运行)"));
+            let err = windows_sys::Win32::Foundation::GetLastError();
+            return Err(format!("无法连接授权管道 {name}(不在沙箱内或 broker 未运行) GetLastError={err}"));
         }
         let req = serde_json::json!({
             "op": "file", "path": path, "access": access, "token": token,

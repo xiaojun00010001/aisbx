@@ -95,10 +95,10 @@ fn flow(args: &[String]) -> i32 {
         .unwrap_or_else(|| PathBuf::from("aisbx.exe"));
 
     let escalate = |token: &str| -> i32 {
+        // 不能用 Stdio::null():AppContainer 内打开 NUL 设备被拒(os error 5),
+        // 默认继承父进程句柄即可,输出随 flow 一起落盘,反而便于取证。
         match Command::new(&exe)
             .args(["escalate", "-p", &policy, "--path", &target, "--access", "write", "--token", token])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
             .status()
         {
             Ok(s) => s.code().unwrap_or(1),
