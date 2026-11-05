@@ -72,29 +72,47 @@ try {
   Assert "T1c 白名单内写入成功" (($LASTEXITCODE -eq 0) -and (Test-Path "$ws\f1.txt"))
 
   # ── T2 token 授权闭环 ────────────────────────────────────────────
+  # broker 生命周期 = 一次 run,故 token 必须在 run 存活期间由宿主签发。
   Write-Host "== T2 token 授权闭环 =="
-  # deny 模式下无 token 提权必须失败
+  # T2a: deny 模式下无 token 提权必须失败
   & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f2.txt" --access write 2>$null
   Assert "T2a 无 token 提权被拒(deny 模式)" ($LASTEXITCODE -ne 0)
 
-  # 宿主侧签发(用户同意动作的代理点)
+  # T2b~T2e: 后台 run 保活 broker -> 宿主 authorize -> 沙箱内消费/写入/重放
+  $tokFile = Join-Path $ws "token.txt"
+  Remove-Item $tokFile -ErrorAction SilentlyContinue
+  $job = Start-Job -ArgumentList $bin, $p1, $ws, $out, $tokFile -ScriptBlock {
+    param($b, $p, $w, $o, $tf)
+    & $b run -p $p -- "$w\burn.exe" flow $p $tf "$o\f2.txt" grant
+  }
+  Start-Sleep -Seconds 2
   $auth = (& $bin authorize -p $p1 --path $out --access write --ttl-seconds 120) | Out-String | ConvertFrom-Json
-  Assert "T2b authorize 签发 token" ($null -ne $auth.token -and $auth.token.Length -ge 32)
+  Assert "T2b authorize 在 run 存活期签发 token" ($LASTEXITCODE -eq 0 -and $null -ne $auth.token -and $auth.token.Length -ge 32)
 
-  # 沙箱内消费 → ACL 落地 → 真实写入放行
-  & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f2.txt" --access write --token $auth.token 2>$null
-  Assert "T2c token 消费成功" ($LASTEXITCODE -eq 0)
-  & $bin run -p $p1 -- "$ws\burn.exe" write "$out\f2.txt"
-  Assert "T2d 授权后真实写入放行" (($LASTEXITCODE -eq 0) -and (Test-Path "$out\f2.txt"))
+  Set-Content -Path $tokFile -Value $auth.token -Encoding ascii
+  Wait-Job $job -Timeout 60 | Out-Null
+  $r1 = (Receive-Job $job) 2>&1 | Out-String
+  Remove-Job $job -Force
+  Write-Host ($r1.Trim())
+  Assert "T2c 沙箱内消费 token 成功" ($r1 -match "escalate=0")
+  Assert "T2d 授权后真实写入放行" (Test-Path "$out\f2.txt")
+  Assert "T2e token 不可重放" ($r1 -match "replay=(?!0)\d+")
 
-  # 一次性:同 token 再消费必须失败
-  & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f3.txt" --access write --token $auth.token 2>$null
-  Assert "T2e token 不可重放" ($LASTEXITCODE -ne 0)
-
-  # 黑名单前置:token 也救不回 deny_escalation
-  $auth2 = (& $bin authorize -p $p1 --path "$env:ProgramData\ssh" --access write) | Out-String | ConvertFrom-Json
-  & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$env:ProgramData\ssh" --access write --token $auth2.token 2>$null
-  Assert "T2f deny_escalation 优先于 token" ($LASTEXITCODE -ne 0)
+  # T2f: 黑名单前置,token 也救不回 deny_escalation
+  $tokFile2 = Join-Path $ws "token2.txt"
+  Remove-Item $tokFile2 -ErrorAction SilentlyContinue
+  $job2 = Start-Job -ArgumentList $bin, $p1, $ws, $env:ProgramData, $tokFile2 -ScriptBlock {
+    param($b, $p, $w, $pd, $tf)
+    & $b run -p $p -- "$w\burn.exe" flow $p $tf "$pd\ssh" deny
+  }
+  Start-Sleep -Seconds 2
+  $auth2 = (& $bin authorize -p $p1 --path "$env:ProgramData\ssh" --access write --ttl-seconds 60) | Out-String | ConvertFrom-Json
+  Set-Content -Path $tokFile2 -Value $auth2.token -Encoding ascii
+  Wait-Job $job2 -Timeout 60 | Out-Null
+  $r2 = (Receive-Job $job2) 2>&1 | Out-String
+  Remove-Job $job2 -Force
+  Write-Host ($r2.Trim())
+  Assert "T2f deny_escalation 优先于 token" ($r2 -match "escalate=(?!0)\d+")
 
   # ── T3 资源限制 ──────────────────────────────────────────────────
   Write-Host "== T3 资源限制(单进程 64MB / 全任务 256MB / 进程数 10) =="

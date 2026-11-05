@@ -36,9 +36,16 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     granted_paths.push(policy_file.to_string());
 
     // 4. 网络:回环例外(不开 internet capability)
+    //    写入失败不阻断整个任务:exception 表打满时仍可完成文件/资源等隔离验证,
+    //    回环可达性由 T4 断言真实反映。
     if policy.network.loopback {
-        loopback::exempt_loopback(&package_sid)?;
-        emit(serde_json::json!({"event": "network", "loopback": true}));
+        match loopback::exempt_loopback(&package_sid) {
+            Ok(()) => emit(serde_json::json!({"event": "network", "loopback": true})),
+            Err(e) => {
+                eprintln!("aisbx: 警告: 回环例外写入失败,将在无回环能力下继续: {e}");
+                emit(serde_json::json!({"event": "network", "loopback": false, "error": e}));
+            }
+        }
     }
 
     // 5. LowBox token(internet=true 时注入 capability)
@@ -65,9 +72,12 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     let code = child.wait_exit_code()?;
     unsafe { WaitForSingleObject(jb.handle, INFINITE) };
 
-    // 10. 清理:撤 ACL、关句柄(SID/token/Job 随对象废弃,无注册表残留)
+    // 10. 清理:撤 ACL、回收回环例外、关句柄(SID/token/Job 随对象废弃)
     for p in &granted_paths {
         acl::revoke(&package_sid, p);
+    }
+    if policy.network.loopback {
+        loopback::revoke_loopback(&package_sid);
     }
     unsafe { token::drop_token(h_token) };
     emit(serde_json::json!({"event": "exit", "code": code}));

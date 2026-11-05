@@ -8,12 +8,13 @@ fn main() {
         Some("spin") => spin(args.get(1).and_then(|v| v.parse().ok()).unwrap_or(5)),
         Some("fork") => fork(args.get(1).and_then(|v| v.parse().ok()).unwrap_or(10)),
         Some("write") => write(args.get(1).map(|s| s.as_str()).unwrap_or("")),
+        Some("flow") => flow(&args[1..]),
         Some("conn") => conn(
             args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1"),
             args.get(2).and_then(|v| v.parse().ok()).unwrap_or(80),
         ),
         _ => {
-            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | conn <host> <port>");
+            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | conn <host> <port> | flow <policy> <tokenFile> <target> <grant|deny>");
             2
         }
     };
@@ -66,6 +67,76 @@ fn fork(n: u32) -> i32 {
     }
     println!("spawned {ok}/{n}");
     if ok == n { 0 } else { 2 }
+}
+
+/// 授权闭环载荷(运行在沙箱内):等待宿主写入 token 文件 → 消费 token →
+/// 真实写入 → 用同一 token 重放。
+/// 参数: flow <policy> <tokenFile> <targetPath> <grant|deny>
+/// grace: 期望 escalate 成功并写入;deny: 期望 escalate 被拒(黑名单优先)。
+fn flow(args: &[String]) -> i32 {
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    let policy = args.first().cloned().unwrap_or_default();
+    let token_file = args.get(1).cloned().unwrap_or_default();
+    let target = args.get(2).cloned().unwrap_or_default();
+    let expect = args.get(3).cloned().unwrap_or_else(|| "grant".into());
+    let exe: PathBuf = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("aisbx.exe")))
+        .unwrap_or_else(|| PathBuf::from("aisbx.exe"));
+
+    let escalate = |token: &str| -> i32 {
+        Command::new(&exe)
+            .args(["escalate", "-p", &policy, "--path", &target, "--access", "write", "--token", token])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.code().unwrap_or(1))
+            .unwrap_or(99)
+    };
+
+    // 等宿主 authorize 写入 token(run 存活期间)
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut token = String::new();
+    while Instant::now() < deadline {
+        if let Ok(s) = std::fs::read_to_string(&token_file) {
+            let t = s.trim().to_string();
+            if !t.is_empty() {
+                token = t;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if token.is_empty() {
+        eprintln!("flow: 等待 token 超时");
+        return 3;
+    }
+
+    let first = escalate(&token);
+    println!("escalate={first}");
+
+    if expect.eq_ignore_ascii_case("deny") {
+        return if first != 0 { 0 } else { 1 };
+    }
+    if first != 0 {
+        return 1;
+    }
+
+    let wrote = std::fs::write(&target, b"x").is_ok();
+    println!("write={}", if wrote { "ok" } else { "fail" });
+
+    // 一次性 token:重放必须被拒
+    let replay = escalate(&token);
+    println!("replay={replay}");
+
+    if !wrote || replay == 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// 向 path 写入一个字节。成功 0 / 失败(ACL 拒绝等)1 / 参数缺失 2。
