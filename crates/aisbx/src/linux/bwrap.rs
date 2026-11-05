@@ -32,6 +32,7 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
         "--ro-bind".into(), "/".into(), "/".into(),
         "--tmpfs".into(), "/tmp".into(),
         "--dev".into(), "/dev".into(),
+        "--unshare-user".into(),  // --disable-userns 依赖 user namespace
         "--unshare-pid".into(),
         "--unshare-net".into(),   // 外网默认全断;helper 里把 lo 置 up 放行回环
         "--disable-userns".into(), // 防沙箱内自建 userns 后 mount/umount 拆掉只读 bind

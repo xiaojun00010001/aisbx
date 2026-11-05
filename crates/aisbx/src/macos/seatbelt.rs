@@ -52,9 +52,11 @@ pub fn profile(policy: &Policy, ctx: &RunCtx) -> String {
     // 运行所需的最小能力
     out.push_str("(allow process-exec)\n(allow process-fork)\n(allow sysctl-read)\n");
     out.push_str("(allow mach-lookup)\n(allow file-map-executable)\n");
-    // 网络:仅回环;出站到非 localhost 由 deny default 拒绝
+    // 网络:仅回环。
+    // 注意:不能加 (allow network* (local ip "localhost:*"))——任何出站连接的 local ip
+    // 都是本机接口,那条规则会匹配并放开【所有】外网连接(实测 1.1.1.1 从 EPERM 变 timeout)。
+    // 只给 remote=localhost 的 allow,其余由 deny default 拒绝(实测外网 EPERM errno=1)。
     out.push_str("(allow network* (remote ip \"localhost:*\"))\n");
-    out.push_str("(allow network* (local ip \"localhost:*\"))\n");
     out
 }
 
