@@ -17,6 +17,27 @@ pub fn grant_file(sid: &str, path: &str, write: bool) -> Result<(), String> {
     icacls(&["/grant", &format!("*{sid}:{perms}")], path)
 }
 
+/// 对任意路径落 ACL,返回实际被授权的路径。
+///
+/// 提权常发生在「文件尚不存在、沙箱随后要创建」的场景,而 icacls 对不存在的
+/// 文件会直接报 "The system cannot find the file specified"。此时改为对父目录
+/// 授予可继承 ACE(OI)(CI),新建文件自动继承,语义等价于"允许写入该路径"。
+pub fn grant_path(sid: &str, path: &str, write: bool) -> Result<String, String> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        grant_dir(sid, path, write)?;
+        Ok(path.to_string())
+    } else if p.exists() {
+        grant_file(sid, path, write)?;
+        Ok(path.to_string())
+    } else {
+        let parent = p.parent().ok_or_else(|| format!("路径无父目录: {path}"))?;
+        let parent_s = parent.to_string_lossy().to_string();
+        grant_dir(sid, &parent_s, write)?;
+        Ok(parent_s)
+    }
+}
+
 /// 撤销该 SID 在路径上的 ACE(任务结束时调用)
 pub fn revoke(sid: &str, path: &str) {
     let _ = icacls(&["/remove", &format!("*{sid}")], path);

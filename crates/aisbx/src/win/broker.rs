@@ -396,11 +396,12 @@ fn decide_file(policy: &Policy, req: &EscRequest, audit: &Audit, package_sid: &s
         return json_reply(false, "授权被拒绝");
     }
 
-    // 3) 授权落 ACL(粒度=该具体路径),后续真实 syscall 直接放行
-    match if is_dir(&path) { acl::grant_dir(package_sid, &path, write) } else { acl::grant_file(package_sid, &path, write) } {
-        Ok(()) => {
+    // 3) 授权落 ACL(目标文件不存在时授权其父目录继承),后续真实 syscall 直接放行
+    match acl::grant_path(package_sid, &path, write) {
+        Ok(acl_target) => {
             audit.log(&serde_json::json!({
                 "event": "escalation.grant", "op": "file", "path": path,
+                "acl_target": acl_target,
                 "access": req.access, "requested_by": req.requested_by
             }));
             json_reply(true, "已按具体路径授予 ACL")
@@ -493,12 +494,13 @@ fn redeem_token(token: &str, path: &str, access: &str, package_sid: &str, tokens
         }));
         return json_reply(false, "授权 token 无效、已过期、已消费或与路径/访问级别不匹配");
     };
-    // 按 token 覆盖的具体路径落 ACL;token 为目录时子树继承
+    // 按 token 覆盖的具体路径落 ACL;文件尚不存在时授权父目录继承
     let write = t.access.eq_ignore_ascii_case("write");
-    match if is_dir(path) { acl::grant_dir(package_sid, path, write) } else { acl::grant_file(package_sid, path, write) } {
-        Ok(()) => {
+    match acl::grant_path(package_sid, path, write) {
+        Ok(acl_target) => {
             audit.log(&serde_json::json!({
-                "event": "token.redeemed", "path": path, "access": access
+                "event": "token.redeemed", "path": path, "acl_target": acl_target,
+                "access": access
             }));
             json_reply(true, "已按授权 token 授予 ACL(具体路径)")
         }
