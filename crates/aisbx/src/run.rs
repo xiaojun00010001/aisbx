@@ -100,7 +100,7 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
                 JobObjectBasicProcessIdList,
                 buf.as_mut_ptr() as *mut std::ffi::c_void,
                 buf.len() as u32,
-                Some(&mut ret),
+                &mut ret,
             )
         };
         if ok != 0 {
