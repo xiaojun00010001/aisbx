@@ -57,6 +57,10 @@ pub fn profile(policy: &Policy, ctx: &RunCtx) -> String {
     // 都是本机接口,那条规则会匹配并放开【所有】外网连接(实测 1.1.1.1 从 EPERM 变 timeout)。
     // 只给 remote=localhost 的 allow,其余由 deny default 拒绝(实测外网 EPERM errno=1)。
     out.push_str("(allow network* (remote ip \"localhost:*\"))\n");
+    // 回环监听/接受只需 bind 与 inbound 的 local 规则;限定操作类型,
+    // 不会像 network* + local ip 那样把全部出站一起放行(实测外网仍 EPERM)。
+    out.push_str("(allow network-bind (local ip \"localhost:*\"))\n");
+    out.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");
     out
 }
 
