@@ -11,6 +11,7 @@ fn main() {
         Some("flow") => flow(&args[1..]),
         Some("servepipe") => servepipe(&args[1..]),
         Some("openpipe") => openpipe(args.get(1).map(|s| s.as_str()).unwrap_or("")),
+        Some("tokeninfo") => tokeninfo(),
         Some("conn") => conn(
             args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1"),
             args.get(2).and_then(|v| v.parse().ok()).unwrap_or(80),
@@ -70,6 +71,68 @@ fn fork(n: u32) -> i32 {
     }
     println!("spawned {ok}/{n}");
     if ok == n { 0 } else { 2 }
+}
+
+/// 打印当前进程令牌的 User / 组 SID / 完整性级别(诊断:核对 AppContainer 身份)。
+fn tokeninfo() -> i32 {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree, PSID};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenGroups, TokenIntegrityLevel, TokenUser, TOKEN_GROUPS,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    unsafe fn sid_str(psid: PSID) -> String {
+        let mut out: windows_sys::core::PWSTR = std::ptr::null_mut();
+        unsafe {
+            if ConvertSidToStringSidW(psid, &mut out) == 0 || out.is_null() {
+                return "?".into();
+            }
+            let n = (0..256).take_while(|&i| *out.add(i) != 0).count();
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(out, n));
+            LocalFree(out as _);
+            s
+        }
+    }
+
+    unsafe fn query(h: HANDLE, class: i32) -> Option<Vec<u8>> {
+        let mut need: u32 = 0;
+        GetTokenInformation(h, class, std::ptr::null_mut(), 0, &mut need);
+        if need == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; need as usize];
+        if GetTokenInformation(h, class, buf.as_mut_ptr() as *mut _, need, &mut need) == 0 {
+            return None;
+        }
+        Some(buf)
+    }
+
+    unsafe {
+        let mut h: HANDLE = 0;
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut h) == 0 {
+            eprintln!("tokeninfo: OpenProcessToken 失败");
+            return 1;
+        }
+        if let Some(b) = query(h, TokenUser) {
+            let tu = &*(b.as_ptr() as *const TOKEN_USER);
+            println!("user={}", sid_str(tu.User.Sid));
+        }
+        if let Some(b) = query(h, TokenGroups) {
+            let tg = &*(b.as_ptr() as *const TOKEN_GROUPS);
+            let n = tg.GroupCount as usize;
+            let arr = std::slice::from_raw_parts(tg.Groups.as_ptr(), n);
+            let sids: Vec<String> = arr.iter().map(|g| format!("{}(0x{:x})", sid_str(g.Sid), g.Attributes)).collect();
+            println!("groups({n})={}", sids.join(","));
+        }
+        if let Some(b) = query(h, TokenIntegrityLevel) {
+            let ml = &*(b.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            println!("il={}", sid_str(ml.Label.Sid));
+        }
+        CloseHandle(h);
+    }
+    0
 }
 
 /// 宿主机侧:建一根命名管道(可指定 SDDL),等待一次连接。用于冒烟探针。

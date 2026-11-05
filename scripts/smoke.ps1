@@ -144,6 +144,7 @@ try {
 
   # ── T6 管道连通探针(诊断,不计失败) ─────────────────────────────
   Write-Host "[$(Get-Date -Format HH:mm:ss)] == T6 管道探针(诊断:WD / AC / 默认SD) =="
+  & $bin run -p $p1 -- "$ws\burn.exe" tokeninfo
   foreach ($case in @(
       @{ n = 'wd'; sddl = 'D:(A;;GA;;;WD)' },
       @{ n = 'ac'; sddl = 'D:(A;;GA;;;AC)' },
