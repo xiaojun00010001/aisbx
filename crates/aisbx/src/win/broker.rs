@@ -120,7 +120,13 @@ unsafe fn create_pipe(name: &str, package_sid: &str) -> Result<HANDLE, String> {
     // NO_WRITE_UP,低完整性的 AppContainer 子进程打开即 ACCESS_DENIED(GetLastError=5)。
     // NW = NO_WRITE_UP 只限制"低写高",对象自身是 Low 时 Low 客户端可正常读写。
     // 注意:SACL 能否写进 SD 依赖 SeSecurityPrivilege 已启用(见 start_server)。
-    create_pipe_sddl(name, &format!("D:(A;;GA;;;{package_sid})S:(ML;;NW;;;LW)"))
+    // AC(ALL APPLICATION PACKAGES) 兜底:某些内核版本对 LowBox token 的
+    // package SID DACL 匹配存在差异,连不上时退而求其次(管道名含任务随机段,
+    // 协议层还有 token 一次性校验兜底)。
+    create_pipe_sddl(
+        name,
+        &format!("D:(A;;GA;;;{package_sid})(A;;GA;;;AC)S:(ML;;NW;;;LW)"),
+    )
 }
 
 /// 启用 SeSecurityPrivilege(管理员的该特权默认处于禁用态)。
@@ -165,6 +171,23 @@ unsafe fn create_pipe_sddl(name: &str, sddl: &str) -> Result<HANDLE, String> {
     ) == 0
     {
         return Err("ConvertStringSecurityDescriptorToSecurityDescriptorW 失败".into());
+    }
+    // 诊断:回读最终 SD,确认 DACL/SACL ACE 真实落盘(CI 日志取证用)
+    {
+        use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+        use windows_sys::Win32::Security::{
+            DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+            SACL_SECURITY_INFORMATION,
+        };
+        let mut out: windows_sys::core::PWSTR = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let si = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION
+            | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
+        if ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, si, &mut out, &mut out_len) != 0 && !out.is_null() {
+            let len = (0..out_len as usize).take_while(|&i| *out.add(i) != 0).count();
+            eprintln!("aisbx: pipe SD({name}) = {}", String::from_utf16_lossy(std::slice::from_raw_parts(out, len)));
+            windows_sys::Win32::Foundation::LocalFree(out as _);
+        }
     }
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
