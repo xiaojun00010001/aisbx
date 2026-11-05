@@ -39,6 +39,22 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
         "--clearenv".into(),
     ];
 
+    // 只读挂载必须排在可写 bind 之前:bwrap 按顺序挂载,后出现的 ro-bind
+    // (尤其策略文件父目录)会覆盖其下已建立的 rw bind,使白名单/授权目录变只读。
+    let broker_dir = ctx.broker_dir.to_string_lossy().to_string();
+    v.push("--ro-bind".into());
+    v.push(broker_dir.clone());
+    v.push(broker_dir.clone());
+    // --tmpfs /tmp 会隐藏 /tmp 下的策略文件;沙箱内 `aisbx escalate -p` 需要读它
+    if let Some(parent) = Path::new(&ctx.policy_file).parent() {
+        let dir = canon(&parent.to_string_lossy());
+        if Path::new(&dir).is_dir() {
+            v.push("--ro-bind".into());
+            v.push(dir.clone());
+            v.push(dir);
+        }
+    }
+
     // 策略白名单 + 本次已授权路径(B 契约:授权只影响下一次执行的策略快照)
     let mut rw: Vec<String> = policy
         .filesystem
@@ -62,20 +78,6 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
             v.push("--ro-bind".into());
             v.push(c.clone());
             v.push(c);
-        }
-    }
-    // broker 的 UDS 目录必须可见(只读即可)
-    let broker_dir = ctx.broker_dir.to_string_lossy().to_string();
-    v.push("--ro-bind".into());
-    v.push(broker_dir.clone());
-    v.push(broker_dir.clone());
-    // --tmpfs /tmp 会隐藏 /tmp 下的策略文件;沙箱内 `aisbx escalate -p` 需要读它
-    if let Some(parent) = Path::new(&ctx.policy_file).parent() {
-        let dir = canon(&parent.to_string_lossy());
-        if Path::new(&dir).is_dir() {
-            v.push("--ro-bind".into());
-            v.push(dir.clone());
-            v.push(dir);
         }
     }
 

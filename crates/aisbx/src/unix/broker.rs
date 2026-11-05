@@ -67,6 +67,7 @@ impl Broker {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Default)]
 pub struct RunSnapshot {
     pub granted: Vec<String>,

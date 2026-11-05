@@ -10,14 +10,19 @@ pub fn linux_helper(args: &[String]) -> Result<i32, String> {
         return Err("空命令".into());
     }
 
-    // netns 内 lo 默认 down;借用 userns 内 CAP_NET_ADMIN 置 up
-    let ip = std::process::Command::new("ip")
-        .args(["link", "set", "lo", "up"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    if ip.as_ref().map(|s| !s.success()).unwrap_or(true) {
-        eprintln!("aisbx: 警告: lo 置 up 失败(ip 不可用?),回环可能不可达");
+    // netns 内 lo 可能 down;借用 userns 内 CAP_NET_ADMIN 置 up。
+    // 某些 runner 没有 ip 或 lo 本就 up,此时静默跳过(冒烟 T4a 会真实验证回环)。
+    for bin in ["ip", "/sbin/ip", "/usr/sbin/ip"] {
+        if let Ok(s) = std::process::Command::new(bin)
+            .args(["link", "set", "lo", "up"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            if s.success() {
+                break;
+            }
+        }
     }
 
     let err = std::process::Command::new(&cmd[0]).args(&cmd[1..]).exec();
