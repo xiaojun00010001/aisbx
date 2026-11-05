@@ -24,9 +24,10 @@ if (-not (Test-Path $bin))  { throw "aisbx.exe 未生成" }
 if (-not (Test-Path $burn)) { throw "burn.exe 未生成" }
 
 $script:fail = 0
+$script:rows = @()
 function Assert($name, $cond) {
-  if ($cond) { Write-Host "  PASS  $name" -ForegroundColor Green }
-  else       { Write-Host "  FAIL  $name" -ForegroundColor Red; $script:fail++ }
+  if ($cond) { Write-Host "  PASS  $name" -ForegroundColor Green; $script:rows += "| $name | PASS |" }
+  else       { Write-Host "  FAIL  $name (exit=$LASTEXITCODE)" -ForegroundColor Red; $script:rows += "| $name | **FAIL** (exit=$LASTEXITCODE) |"; $script:fail++ }
 }
 function Warn($name) { Write-Host "  WARN  $name" -ForegroundColor Yellow }
 
@@ -64,10 +65,10 @@ try {
 
   # ── T1 文件默认隔离 ──────────────────────────────────────────────
   Write-Host "== T1 文件默认隔离 =="
-  & $bin run -p $p1 -- cmd /c "echo x > `"$out\f1.txt`"" 2>$null
+  & $bin run -p $p1 -- "$ws\burn.exe" write "$out\f1.txt" 2>$null
   Assert "T1a 白名单外写入被拒(退出码非 0)" ($LASTEXITCODE -ne 0)
   Assert "T1b 白名单外文件未落盘" (-not (Test-Path "$out\f1.txt"))
-  & $bin run -p $p1 -- cmd /c "echo x > f1.txt"
+  & $bin run -p $p1 -- "$ws\burn.exe" write "$ws\f1.txt"
   Assert "T1c 白名单内写入成功" (($LASTEXITCODE -eq 0) -and (Test-Path "$ws\f1.txt"))
 
   # ── T2 token 授权闭环 ────────────────────────────────────────────
@@ -83,7 +84,7 @@ try {
   # 沙箱内消费 → ACL 落地 → 真实写入放行
   & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f2.txt" --access write --token $auth.token 2>$null
   Assert "T2c token 消费成功" ($LASTEXITCODE -eq 0)
-  & $bin run -p $p1 -- cmd /c "echo x > `"$out\f2.txt`""
+  & $bin run -p $p1 -- "$ws\burn.exe" write "$out\f2.txt"
   Assert "T2d 授权后真实写入放行" (($LASTEXITCODE -eq 0) -and (Test-Path "$out\f2.txt"))
 
   # 一次性:同 token 再消费必须失败
@@ -136,4 +137,9 @@ finally {
 Write-Host ""
 if ($script:fail -eq 0) { Write-Host "冒烟验证全部通过" -ForegroundColor Green }
 else                    { Write-Host "冒烟验证失败 $script:fail 项" -ForegroundColor Red }
+
+if ($env:GITHUB_STEP_SUMMARY) {
+  $md = @("### aisbx Windows 冒烟结果", "", "| 断言 | 结果 |", "|---|---|") + $script:rows
+  $md | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+}
 exit $script:fail

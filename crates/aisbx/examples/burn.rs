@@ -7,12 +7,13 @@ fn main() {
         Some("mem") => mem(args.get(1).and_then(|v| v.parse().ok()).unwrap_or(64)),
         Some("spin") => spin(args.get(1).and_then(|v| v.parse().ok()).unwrap_or(5)),
         Some("fork") => fork(args.get(1).and_then(|v| v.parse().ok()).unwrap_or(10)),
+        Some("write") => write(args.get(1).map(|s| s.as_str()).unwrap_or("")),
         Some("conn") => conn(
             args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1"),
             args.get(2).and_then(|v| v.parse().ok()).unwrap_or(80),
         ),
         _ => {
-            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | conn <host> <port>");
+            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | conn <host> <port>");
             2
         }
     };
@@ -65,6 +66,25 @@ fn fork(n: u32) -> i32 {
     }
     println!("spawned {ok}/{n}");
     if ok == n { 0 } else { 2 }
+}
+
+/// 向 path 写入一个字节。成功 0 / 失败(ACL 拒绝等)1 / 参数缺失 2。
+/// 用于替换 `cmd /c echo >` —— 避免 Windows 命令行引号解析带来的不确定性。
+fn write(path: &str) -> i32 {
+    if path.is_empty() {
+        eprintln!("write 需要目标路径");
+        return 2;
+    }
+    match std::fs::write(path, b"x") {
+        Ok(_) => {
+            println!("wrote {path}");
+            0
+        }
+        Err(e) => {
+            eprintln!("write failed: {e}");
+            1
+        }
+    }
 }
 
 /// 连接 host:port(带 3s 超时,避免无 capability 时挂死)。成功 0 / 失败 1。
