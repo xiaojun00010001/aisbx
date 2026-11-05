@@ -180,7 +180,7 @@ unsafe fn set_low_integrity(token: HANDLE) -> Result<(), String> {
 /// 校验),因此管道 DACL 必须同时授予用户 SID 才能通过标准 DACL 检查。
 /// 沙箱令牌由本进程令牌复制而来,user SID 一致。
 pub unsafe fn current_user_sid() -> Result<String, String> {
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_USER};
     let mut h: HANDLE = 0;
     if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut h) == 0 {
         return Err("OpenProcessToken 失败".into());

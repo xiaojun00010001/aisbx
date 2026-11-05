@@ -106,8 +106,7 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
         };
         let n = if ok != 0 { usize::from_ne_bytes(buf[0..8].try_into().unwrap()) } else { 0 };
         if n == 0 {
-            // Job 已空但句柄未转 signaled:仅记录,无需强杀(KILL_ON_JOB_CLOSE 兜底)
-            eprintln!("aisbx: Job 已空但 wait 未触发(0x{wr:08X}),跳过强杀");
+            // Job 已空但句柄未转 signaled:无需强杀(KILL_ON_JOB_CLOSE 兜底)
         } else {
             let mut pids = String::new();
             for i in 0..n.min(16) {

@@ -142,25 +142,6 @@ try {
     if (-not $isAdmin) { Warn "非管理员:CheckNetIsolation 回环例外可能写入失败,T4a 结果仅供参考(GitHub Actions runner 为管理员)" }
   }
 
-  # ── T6 管道连通探针(诊断,不计失败) ─────────────────────────────
-  Write-Host "[$(Get-Date -Format HH:mm:ss)] == T6 管道探针(诊断:WD / AC / 默认SD) =="
-  & $bin run -p $p1 -- "$ws\burn.exe" tokeninfo
-  foreach ($case in @(
-      @{ n = 'wd'; sddl = 'D:(A;;GA;;;WD)' },
-      @{ n = 'ac'; sddl = 'D:(A;;GA;;;AC)' },
-      @{ n = 'def'; sddl = $null })) {
-    $pname = "aisbx-probe-$PID-$($case.n)"
-    $svargs = @('servepipe', $pname)
-    if ($case.sddl) { $svargs += $case.sddl }
-    $sv = Start-Process -FilePath "$ws\burn.exe" -ArgumentList $svargs -PassThru -NoNewWindow `
-      -RedirectStandardOutput (Join-Path $ws "sv-$($case.n).out") `
-      -RedirectStandardError (Join-Path $ws "sv-$($case.n).err")
-    Start-Sleep -Milliseconds 900
-    & $bin run -p $p1 -- "$ws\burn.exe" openpipe $pname
-    Write-Host "  探针[$($case.n)] 退出码=$LASTEXITCODE"
-    if (-not $sv.HasExited) { $sv.Kill() }
-  }
-
   # ── T5 审计断言 ──────────────────────────────────────────────────
   Write-Host "[$(Get-Date -Format HH:mm:ss)] == T5 审计 =="
   $events = Get-Content $audit | ForEach-Object { ($_ | ConvertFrom-Json).event }

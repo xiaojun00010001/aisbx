@@ -43,8 +43,9 @@ pub fn start_server(policy: &Policy, package_sid: &str) -> Arc<AtomicBool> {
     // SACL(强制完整性标签)要写进管道 SD,ConvertStringSD 要求 SeSecurityPrivilege
     // 处于启用态,否则 SACL 会被【静默丢弃】-> 管道保持默认 Medium IL + NO_WRITE_UP,
     // 低完整性的 AppContainer 子进程一律 ACCESS_DENIED。先提权再建管道。
-    let priv_ok = enable_security_privilege();
-    eprintln!("aisbx: SeSecurityPrivilege enabled={priv_ok}");
+    if !enable_security_privilege() {
+        eprintln!("aisbx: 警告: SeSecurityPrivilege 启用失败,沙箱管道可能保持默认完整性策略");
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let tokens: TokenStore = Arc::new(Mutex::new(HashMap::new()));
     let sid = package_sid.to_string();
@@ -117,9 +118,6 @@ unsafe fn create_pipe(name: &str, package_sid: &str) -> Result<HANDLE, String> {
     // DACL = 用户 SID(标准检查) + package SID(AppContainer 校验),缺一不可。
     // SACL Low 强制标签必需:否则默认 Medium IL + NO_WRITE_UP 会拒低完整性子进程。
     // SDDL 的 S: 段可能被静默丢弃,故在下方用 SetSecurityInfo 显式写标签。
-    // AC(ALL APPLICATION PACKAGES) 兜底:某些内核版本对 LowBox token 的
-    // package SID DACL 匹配存在差异,连不上时退而求其次(管道名含任务随机段,
-    // 协议层还有 token 一次性校验兜底)。
     // 常规 DACL 检查看 token 的 user/groups,AppContainer 校验另看 package SID,
     // 两者都要有 ACE:文件侧 icacls 是"追加"(原用户 ACE 仍在),管道 SD 是全新的,
     // 只写 package SID 会让标准 DACL 检查直接失败(GetLastError=5)。
@@ -128,13 +126,9 @@ unsafe fn create_pipe(name: &str, package_sid: &str) -> Result<HANDLE, String> {
         name,
         &format!("D:(A;;GA;;;{user_sid})(A;;GA;;;{package_sid})"),
     )?;
-    // SDDL 的 S: 段在部分环境下会被静默丢弃(实测回读为 "S:"),这里直接写标签兜底
-    match apply_low_label(h) {
-        Ok(()) => match read_label(h) {
-            Ok(l) => eprintln!("aisbx: 管道标签回读 = {l}"),
-            Err(e) => eprintln!("aisbx: 管道标签回读失败: {e}"),
-        },
-        Err(e) => eprintln!("aisbx: 警告: 管道 Low 完整性标签设置失败: {e}"),
+    // SDDL 的 S: 段在部分环境下会被静默丢弃,这里直接写标签兜底
+    if let Err(e) = apply_low_label(h) {
+        eprintln!("aisbx: 警告: 管道 Low 完整性标签设置失败: {e}");
     }
     Ok(h)
 }
@@ -188,37 +182,9 @@ unsafe fn apply_low_label(h: HANDLE) -> Result<(), String> {
     Ok(())
 }
 
-/// 从管道句柄回读强制完整性标签的 SID 字符串(取证:确认 Low 标签是否真的生效)。
-unsafe fn read_label(h: HANDLE) -> Result<String, String> {
-    use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
-    use windows_sys::Win32::Security::{ACL, LABEL_SECURITY_INFORMATION};
-    let mut sacl: *mut ACL = std::ptr::null_mut();
-    let mut sd: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    let rc = GetSecurityInfo(
-        h,
-        6, // SE_KERNEL_OBJECT
-        LABEL_SECURITY_INFORMATION,
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        std::ptr::null_mut(),
-        &mut sacl,
-        &mut sd,
-    );
-    if rc != 0 {
-        return Err(format!("GetSecurityInfo win32={rc}"));
-    }
-    let mut out = String::from("(empty)");
-    if !sacl.is_null() {
-        let count = (*sacl).AceCount;
-        out = format!("ace_count={count}");
-    }
-    windows_sys::Win32::Foundation::LocalFree(sd as _);
-    Ok(out)
-}
-
 /// 启用 SeSecurityPrivilege(管理员的该特权默认处于禁用态)。
 fn enable_security_privilege() -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, LUID};
+    use windows_sys::Win32::Foundation::LUID;
     use windows_sys::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
         SE_SECURITY_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
@@ -258,23 +224,6 @@ unsafe fn create_pipe_sddl(name: &str, sddl: &str) -> Result<HANDLE, String> {
     ) == 0
     {
         return Err("ConvertStringSecurityDescriptorToSecurityDescriptorW 失败".into());
-    }
-    // 诊断:回读最终 SD,确认 DACL/SACL ACE 真实落盘(CI 日志取证用)
-    {
-        use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
-        use windows_sys::Win32::Security::{
-            DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-            SACL_SECURITY_INFORMATION,
-        };
-        let mut out: windows_sys::core::PWSTR = std::ptr::null_mut();
-        let mut out_len: u32 = 0;
-        let si = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION
-            | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
-        if ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, si, &mut out, &mut out_len) != 0 && !out.is_null() {
-            let len = (0..out_len as usize).take_while(|&i| *out.add(i) != 0).count();
-            eprintln!("aisbx: pipe SD({name}) = {}", String::from_utf16_lossy(std::slice::from_raw_parts(out, len)));
-            windows_sys::Win32::Foundation::LocalFree(out as _);
-        }
     }
     let sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -540,10 +489,6 @@ fn is_prefix_hit(list: &[String], path: &str) -> bool {
         .any(|base| p == base || p.starts_with(&format!("{base}\\")))
 }
 
-fn is_dir(p: &str) -> bool {
-    std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false)
-}
-
 fn prompt_user(msg: &str) -> bool {
     use std::io::Write;
     eprint!("{msg}");
@@ -586,25 +531,8 @@ pub fn escalate_client(policy: &Policy, path: &str, access: &str, token: &str) -
         );
         if h == INVALID_HANDLE_VALUE {
             let err = windows_sys::Win32::Foundation::GetLastError();
-            // 探针:改以只读打开。只读成功而读写失败 = 完整性标签(IL)拦截;
-            // 只读也被拒 = DACL / AppContainer 校验未通过。
-            let h_ro = CreateFileW(
-                name_w.as_ptr(),
-                GENERIC_READ,
-                FILE_SHARE_NONE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                0,
-                0,
-            );
-            let ro = if h_ro == INVALID_HANDLE_VALUE {
-                format!("denied({})", windows_sys::Win32::Foundation::GetLastError())
-            } else {
-                CloseHandle(h_ro);
-                "ok".to_string()
-            };
             return Err(format!(
-                "无法连接授权管道 {name}(不在沙箱内或 broker 未运行) GetLastError={err}; 只读探针={ro}"
+                "无法连接授权管道 {name}(不在沙箱内或 broker 未运行) GetLastError={err}"
             ));
         }
         let req = serde_json::json!({
