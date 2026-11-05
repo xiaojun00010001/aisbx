@@ -40,6 +40,12 @@ pub struct IssuedToken {
 }
 
 pub fn start_server(policy: &Policy, package_sid: &str) -> Arc<AtomicBool> {
+    // SACL(强制完整性标签)要写进管道 SD,ConvertStringSD 要求 SeSecurityPrivilege
+    // 处于启用态,否则 SACL 会被【静默丢弃】-> 管道保持默认 Medium IL + NO_WRITE_UP,
+    // 低完整性的 AppContainer 子进程一律 ACCESS_DENIED。先提权再建管道。
+    if !enable_security_privilege() {
+        eprintln!("aisbx: 警告: SeSecurityPrivilege 启用失败,沙箱管道可能保持默认完整性策略");
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let tokens: TokenStore = Arc::new(Mutex::new(HashMap::new()));
     let sid = package_sid.to_string();
@@ -113,7 +119,35 @@ unsafe fn create_pipe(name: &str, package_sid: &str) -> Result<HANDLE, String> {
     // SACL 必须显式给 Low 强制标签(S-1-16-4096):否则管道默认 Medium IL +
     // NO_WRITE_UP,低完整性的 AppContainer 子进程打开即 ACCESS_DENIED(GetLastError=5)。
     // NW = NO_WRITE_UP 只限制"低写高",对象自身是 Low 时 Low 客户端可正常读写。
+    // 注意:SACL 能否写进 SD 依赖 SeSecurityPrivilege 已启用(见 start_server)。
     create_pipe_sddl(name, &format!("D:(A;;GA;;;{package_sid})S:(ML;;NW;;;LW)"))
+}
+
+/// 启用 SeSecurityPrivilege(管理员的该特权默认处于禁用态)。
+fn enable_security_privilege() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, LUID};
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+        SE_SECURITY_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut h: HANDLE = 0;
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut h) == 0 {
+            return false;
+        }
+        let mut tp: TOKEN_PRIVILEGES = std::mem::zeroed();
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0] = LUID_AND_ATTRIBUTES { Luid: LUID { LowPart: 0, HighPart: 0 }, Attributes: SE_PRIVILEGE_ENABLED };
+        if LookupPrivilegeValueW(std::ptr::null(), SE_SECURITY_NAME, &mut tp.Privileges[0].Luid) == 0 {
+            CloseHandle(h);
+            return false;
+        }
+        let ok = AdjustTokenPrivileges(h, 0, &tp, 0, std::ptr::null_mut(), std::ptr::null_mut());
+        CloseHandle(h);
+        // AdjustTokenPrivileges 对"令牌未持有该特权"也返回 TRUE,需用 GetLastError 区分
+        ok != 0 && windows_sys::Win32::Foundation::GetLastError() != 1300
+    }
 }
 
 unsafe fn create_pipe_sddl(name: &str, sddl: &str) -> Result<HANDLE, String> {
