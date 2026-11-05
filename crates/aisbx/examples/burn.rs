@@ -24,7 +24,8 @@ fn main() {
 /// 分配并触碰 mb MB 内存。超过 Job 内存上限时分配失败(进程 abort,退出码非 0)。
 fn mem(mb: usize) -> i32 {
     let n = mb * 1024 * 1024;
-    let mut v: Vec<u8> = Vec::with_capacity(n);
+    // 必须用 vec![0; n] 使 len=n(with_capacity 只有 capacity,按下标写会越界 panic)
+    let mut v: Vec<u8> = vec![0u8; n];
     for i in (0..n).step_by(4096) {
         v[i] = 1;
     }
@@ -82,19 +83,30 @@ fn flow(args: &[String]) -> i32 {
     let token_file = args.get(1).cloned().unwrap_or_default();
     let target = args.get(2).cloned().unwrap_or_default();
     let expect = args.get(3).cloned().unwrap_or_else(|| "grant".into());
-    let exe: PathBuf = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("aisbx.exe")))
+    // current_exe 在 Windows 上可能返回 \\?\C:\... 前缀,CreateProcessW 不接受,需剥离
+    let exe_raw = std::env::current_exe().unwrap_or_default();
+    let exe_str = {
+        let s = exe_raw.to_string_lossy().to_string();
+        s.strip_prefix(r"\\?\").map(|x| x.to_string()).unwrap_or(s)
+    };
+    let exe: PathBuf = PathBuf::from(&exe_str)
+        .parent()
+        .map(|d| d.join("aisbx.exe"))
         .unwrap_or_else(|| PathBuf::from("aisbx.exe"));
 
     let escalate = |token: &str| -> i32 {
-        Command::new(&exe)
+        match Command::new(&exe)
             .args(["escalate", "-p", &policy, "--path", &target, "--access", "write", "--token", token])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map(|s| s.code().unwrap_or(1))
-            .unwrap_or(99)
+        {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("flow: spawn {exe:?} 失败: {e}");
+                99
+            }
+        }
     };
 
     // 等宿主 authorize 写入 token(run 存活期间)

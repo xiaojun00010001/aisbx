@@ -91,7 +91,9 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     let code = child.wait_exit_code()?;
     trace("stage9b wait-job");
     // 有限等待 + 兜底强杀:Job 内进程不收敛时避免无限挂起,并枚举残留 PID 供诊断
-    if unsafe { WaitForSingleObject(jb.handle, 5_000) } != 0 {
+    let wr = unsafe { WaitForSingleObject(jb.handle, 5_000) };
+    if wr != 0 {
+        eprintln!("aisbx: wait-job 返回 0x{wr:08X}");
         let mut buf = [0u8; 4096];
         let mut ret: u32 = 0;
         let ok = unsafe {
