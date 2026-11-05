@@ -214,7 +214,7 @@ fn retryflow(args: &[String]) -> i32 {
         println!("net_escalate={n}");
         // 非零退出触发 launcher 以新策略快照重跑(leaked 已打印,不影响返回)
         let _ = leaked;
-        1
+        return 1;
     }
 
     // 第二次:授权路径已进入新的策略快照
