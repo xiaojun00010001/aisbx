@@ -16,7 +16,7 @@ $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
-Write-Host "== 0. 构建 =="
+Write-Host "[$(Get-Date -Format HH:mm:ss)] == 0. 构建 =="
 cargo build --release --bins --example burn 2>&1 | Select-Object -Last 2
 $bin  = Join-Path $repo "target\release\aisbx.exe"
 $burn = Join-Path $repo "target\release\examples\burn.exe"
@@ -59,12 +59,12 @@ $p1    = Join-Path $root "p1.json"
 
 try {
   # ── T0 策略合法性 ────────────────────────────────────────────────
-  Write-Host "== T0 策略 =="
+  Write-Host "[$(Get-Date -Format HH:mm:ss)] == T0 策略 =="
   & $bin policy-check -p $p1
   Assert "T0 策略解析与校验" ($LASTEXITCODE -eq 0)
 
   # ── T1 文件默认隔离 ──────────────────────────────────────────────
-  Write-Host "== T1 文件默认隔离 =="
+  Write-Host "[$(Get-Date -Format HH:mm:ss)] == T1 文件默认隔离 =="
   & $bin run -p $p1 -- "$ws\burn.exe" write "$out\f1.txt"
   Assert "T1a 白名单外写入被拒(退出码非 0)" ($LASTEXITCODE -ne 0)
   Assert "T1b 白名单外文件未落盘" (-not (Test-Path "$out\f1.txt"))
@@ -73,7 +73,7 @@ try {
 
   # ── T2 token 授权闭环 ────────────────────────────────────────────
   # broker 生命周期 = 一次 run,故 token 必须在 run 存活期间由宿主签发。
-  Write-Host "== T2 token 授权闭环 =="
+  Write-Host "[$(Get-Date -Format HH:mm:ss)] == T2 token 授权闭环 =="
   # T2a: deny 模式下无 token 提权必须失败
   & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f2.txt" --access write
   Assert "T2a 无 token 提权被拒(deny 模式)" ($LASTEXITCODE -ne 0)
@@ -115,7 +115,7 @@ try {
   Assert "T2f deny_escalation 优先于 token" ($r2 -match "escalate=(?!0)\d+")
 
   # ── T3 资源限制 ──────────────────────────────────────────────────
-  Write-Host "== T3 资源限制(单进程 64MB / 全任务 256MB / 进程数 10) =="
+  Write-Host "[$(Get-Date -Format HH:mm:ss)] == T3 资源限制(单进程 64MB / 全任务 256MB / 进程数 10) =="
   & $bin run -p $p1 -- "$ws\burn.exe" mem 32
   Assert "T3a 配额内分配成功" ($LASTEXITCODE -eq 0)
   & $bin run -p $p1 -- "$ws\burn.exe" mem 512
@@ -125,7 +125,7 @@ try {
 
   # ── T4 网络 ──────────────────────────────────────────────────────
   if (-not $SkipNetwork) {
-    Write-Host "== T4 网络(loopback=true / internet=false) =="
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T4 网络(loopback=true / internet=false) =="
     $port = 47000 + (Get-Random -Maximum 2000)
     $job = Start-Job -ScriptBlock {
       param($p)
@@ -142,7 +142,7 @@ try {
   }
 
   # ── T5 审计断言 ──────────────────────────────────────────────────
-  Write-Host "== T5 审计 =="
+  Write-Host "[$(Get-Date -Format HH:mm:ss)] == T5 审计 =="
   $events = Get-Content $audit | ForEach-Object { ($_ | ConvertFrom-Json).event }
   Assert "T5a token.issued 已落审计" ($events -contains "token.issued")
   Assert "T5b token.redeemed 已落审计" ($events -contains "token.redeemed")
