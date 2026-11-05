@@ -43,9 +43,8 @@ pub fn start_server(policy: &Policy, package_sid: &str) -> Arc<AtomicBool> {
     // SACL(强制完整性标签)要写进管道 SD,ConvertStringSD 要求 SeSecurityPrivilege
     // 处于启用态,否则 SACL 会被【静默丢弃】-> 管道保持默认 Medium IL + NO_WRITE_UP,
     // 低完整性的 AppContainer 子进程一律 ACCESS_DENIED。先提权再建管道。
-    if !enable_security_privilege() {
-        eprintln!("aisbx: 警告: SeSecurityPrivilege 启用失败,沙箱管道可能保持默认完整性策略");
-    }
+    let priv_ok = enable_security_privilege();
+    eprintln!("aisbx: SeSecurityPrivilege enabled={priv_ok}");
     let stop = Arc::new(AtomicBool::new(false));
     let tokens: TokenStore = Arc::new(Mutex::new(HashMap::new()));
     let sid = package_sid.to_string();
@@ -123,10 +122,64 @@ unsafe fn create_pipe(name: &str, package_sid: &str) -> Result<HANDLE, String> {
     // AC(ALL APPLICATION PACKAGES) 兜底:某些内核版本对 LowBox token 的
     // package SID DACL 匹配存在差异,连不上时退而求其次(管道名含任务随机段,
     // 协议层还有 token 一次性校验兜底)。
-    create_pipe_sddl(
+    let h = create_pipe_sddl(
         name,
-        &format!("D:(A;;GA;;;{package_sid})(A;;GA;;;AC)S:(ML;;NW;;;LW)"),
-    )
+        &format!("D:(A;;GA;;;{package_sid})(A;;GA;;;AC)"),
+    )?;
+    // SDDL 的 S: 段在部分环境下会被静默丢弃(实测回读为 "S:"),这里直接写标签兜底
+    if let Err(e) = apply_low_label(h) {
+        eprintln!("aisbx: 警告: 管道 Low 完整性标签设置失败: {e}");
+    }
+    Ok(h)
+}
+
+/// 给管道句柄显式打 Low 完整性标签(S-1-16-4096 + NO_WRITE_UP)。
+/// 命名管道在无标签时按 Medium+NO_WRITE_UP 强制校验,低完整性的 AppContainer
+/// 子进程写入会被拒(ERROR_ACCESS_DENIED);对象自身为 Low 后同级别即可读写。
+unsafe fn apply_low_label(h: HANDLE) -> Result<(), String> {
+    use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
+    use windows_sys::Win32::Security::{
+        GetLengthSid, InitializeSecurityDescriptor, SetSecurityDescriptorSacl,
+        SECURITY_DESCRIPTOR, LABEL_SECURITY_INFORMATION,
+    };
+    // 常量值来自 Win32 头文件(SYSTEM_MANDATORY_LABEL_ACE_TYPE=17 / NO_WRITE_UP=1)
+    const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 17;
+    const SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: u32 = 1;
+
+    let (sid, free) = super::token::sid_from_string("S-1-16-4096")?;
+    let sid_len = GetLengthSid(sid) as usize;
+    // 自建 ACL:header(8) + ACE{header(4) + mask(4) + SID}
+    let acl_size = 8 + 8 + sid_len;
+    let mut buf = vec![0u8; acl_size + 8];
+    let acl = buf.as_mut_ptr();
+    *acl.add(0) = 2; // AclRevision = ACL_REVISION
+    *acl.add(1) = 0; // Sbz1
+    (acl.add(2) as *mut u16).write_unaligned(acl_size as u16);
+    (acl.add(4) as *mut u16).write_unaligned(1); // AceCount
+    (acl.add(6) as *mut u16).write_unaligned(0); // Sbz2
+    let ace = acl.add(8);
+    *ace.add(0) = SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    *ace.add(1) = 0;
+    (ace.add(2) as *mut u16).write_unaligned((8 + sid_len) as u16);
+    (ace.add(4) as *mut u32).write_unaligned(SYSTEM_MANDATORY_LABEL_NO_WRITE_UP);
+    std::ptr::copy_nonoverlapping(sid as *const u8, ace.add(8), sid_len);
+
+    let mut sd: SECURITY_DESCRIPTOR = std::mem::zeroed();
+    if InitializeSecurityDescriptor(&mut sd as *mut _ as *mut std::ffi::c_void, 1) == 0 {
+        super::token::local_free_sid(free);
+        return Err("InitializeSecurityDescriptor 失败".into());
+    }
+    if SetSecurityDescriptorSacl(&mut sd as *mut _ as *mut std::ffi::c_void, 1, acl as *const _, 0) == 0 {
+        super::token::local_free_sid(free);
+        return Err("SetSecurityDescriptorSacl 失败".into());
+    }
+    // SE_KERNEL_OBJECT = 6
+    let rc = SetSecurityInfo(h, 6, LABEL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null(), acl as *const _);
+    super::token::local_free_sid(free);
+    if rc != 0 {
+        return Err(format!("SetSecurityInfo(label) 失败 win32={rc}"));
+    }
+    Ok(())
 }
 
 /// 启用 SeSecurityPrivilege(管理员的该特权默认处于禁用态)。
