@@ -19,3 +19,6 @@ serde_json = { workspace = true }
 # Linux/macOS 后端依赖(nix/libc)在阶段 2/3 随实现引入,见 docs/04 §5.4。
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

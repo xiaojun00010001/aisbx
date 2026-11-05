@@ -1,7 +1,9 @@
-name: cross-platform-check
+name: cross-platform-smoke
 
-# 阶段 0:只做三平台编译与契约单测,不跑沙箱(内核行为由各平台 smoke 验证)。
-# 见 docs/04-跨平台实现方案.md §5.8 / §6 阶段 0。
+# 方案 B 契约的三平台验证:
+#   windows-smoke.yml 负责 Windows 的 18 项原生断言;
+#   本工作流负责 Linux/macOS 的 B 契约冒烟 + Windows 编译检查。
+# 失败时把完整日志发到 Issue(公开仓库可无鉴权读取),便于远端诊断。
 on:
   push:
     branches: [main]
@@ -10,16 +12,21 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
-  check:
+  unix-smoke:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install Linux sandbox dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap iproute2
 
       - name: Toolchain
         run: rustc -Vv && cargo -V
@@ -27,8 +34,48 @@ jobs:
       - name: Policy contract tests
         run: cargo test -p aisbx-policy
 
-      - name: Cargo check (all targets)
-        run: cargo check --all-targets
+      - name: Build
+        run: cargo build --bins --example burn
 
-      - name: Backend report (binary links and reports its backend)
-        run: cargo run --quiet --bin aisbx -- --help
+      - name: Capability report
+        run: cargo run --quiet --bin aisbx -- capabilities
+
+      - name: Smoke (B contract)
+        shell: bash
+        run: bash scripts/smoke-unix.sh 2>&1 | tee smoke.log
+
+      - name: Publish failure log
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -f smoke.log || echo "no smoke.log" > smoke.log
+          python3 - <<'PY'
+          import json, os, urllib.request
+          raw = open("smoke.log", errors="replace").read()[-60000:]
+          title = "smoke failure %s %s" % (os.environ["GITHUB_RUN_ID"], os.environ["RUNNER_OS"])
+          run = "%s/%s/actions/runs/%s" % (
+              os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"])
+          body = "run: " + run + "\n\n```text\n" + raw + "\n```\n"
+          req = urllib.request.Request(
+              os.environ["GITHUB_API_URL"] + "/repos/" + os.environ["GITHUB_REPOSITORY"] + "/issues",
+              data=json.dumps({"title": title, "body": body}).encode(),
+              headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                       "Accept": "application/vnd.github+json",
+                       "Content-Type": "application/json"})
+          print("issue status", urllib.request.urlopen(req).status)
+          PY
+
+  windows-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Policy contract tests
+        run: cargo test -p aisbx-policy
+      - name: Build (Windows backend unchanged)
+        run: cargo build --bins --example burn
+      - name: Cargo check all targets
+        run: cargo check --all-targets
+      - name: Capability report
+        run: cargo run --quiet --bin aisbx -- capabilities

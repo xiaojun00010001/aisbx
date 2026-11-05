@@ -9,6 +9,8 @@ fn main() {
         Some("fork") => fork(args.get(1).and_then(|v| v.parse().ok()).unwrap_or(10)),
         Some("write") => write(args.get(1).map(|s| s.as_str()).unwrap_or("")),
         Some("flow") => flow(&args[1..]),
+        Some("retryflow") => retryflow(&args[1..]),
+        Some("loopback") => loopback(),
         Some("conn") => conn(
             args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1"),
             args.get(2).and_then(|v| v.parse().ok()).unwrap_or(80),
@@ -149,6 +151,81 @@ fn flow(args: &[String]) -> i32 {
     } else {
         0
     }
+}
+
+/// 回环自检:在同一沙箱进程内起监听并连接,不依赖宿主网络(Linux netns 独立)。
+fn loopback() -> i32 {
+    use std::net::{TcpListener, TcpStream};
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("loopback bind failed: {e}");
+            return 1;
+        }
+    };
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let handle = std::thread::spawn(move || listener.accept().is_ok());
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let ok = TcpStream::connect(("127.0.0.1", port)).is_ok();
+    let _ = handle.join();
+    println!("loopback={}", if ok { "ok" } else { "fail" });
+    if ok { 0 } else { 1 }
+}
+
+/// 方案 B 的端到端载荷:第一次执行被拒并上报,授权后由 launcher 重跑(attempt=2)。
+/// 用法: burn retryflow <target> [grant|deny]
+fn retryflow(args: &[String]) -> i32 {
+    use std::process::Command;
+
+    let target = args.first().cloned().unwrap_or_default();
+    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("grant");
+    let attempt: u32 = std::env::var("AISBX_ATTEMPT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let policy = std::env::var("AISBX_POLICY_FILE").unwrap_or_default();
+    let token = std::env::var("AISBX_TOKEN").unwrap_or_default();
+    let cli = std::env::var("AISBX_CLI").unwrap_or_else(|_| "aisbx".into());
+
+    eprintln!(
+        "retryflow env: cli={cli} policy={policy} broker={}",
+        std::env::var("AISBX_BROKER_DIR").unwrap_or_default()
+    );
+    let escalate = |extra: &[&str]| -> i32 {
+        let mut a: Vec<String> = vec!["escalate".into(), "-p".into(), policy.clone()];
+        a.extend(extra.iter().map(|s| s.to_string()));
+        match Command::new(&cli).args(&a).status() {
+            Ok(s) => s.code().unwrap_or(99),
+            Err(e) => {
+                eprintln!("retryflow spawn {cli} 失败: {e}");
+                99
+            }
+        }
+    };
+
+    if attempt <= 1 {
+        // 第一次:预期真实写被拒
+        let leaked = std::fs::write(&target, b"x").is_ok();
+        println!("first_write={}", if leaked { "LEAK" } else { "denied" });
+        let e = escalate(&["--path", &target, "--access", "write"]);
+        println!("escalate={e}");
+        // 网络越界的拒绝感知与上报
+        let n = escalate(&["--op", "net", "--host", "example.com", "--ip", "1.1.1.1", "--port", "443"]);
+        println!("net_escalate={n}");
+        // 非零退出触发 launcher 以新策略快照重跑
+        return if leaked { 1 } else { 1 };
+    }
+
+    // 第二次:授权路径已进入新的策略快照
+    let wrote = std::fs::write(&target, b"x").is_ok();
+    println!("wrote={}", if wrote { "ok" } else { "fail" });
+    let e1 = escalate(&["--path", &target, "--access", "write", "--token", &token]);
+    let e2 = escalate(&["--path", &target, "--access", "write", "--token", &token]);
+    println!("redeem={e1} replay={e2}");
+    if mode == "deny" {
+        return 1; // 黑名单用例不应走到成功重跑
+    }
+    if wrote && e1 == 0 && e2 != 0 { 0 } else { 1 }
 }
 
 /// 向 path 写入一个字节。成功 0 / 失败(ACL 拒绝等)1 / 参数缺失 2。

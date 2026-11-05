@@ -12,11 +12,11 @@ pub fn backend_name() -> &'static str {
     }
     #[cfg(all(not(windows), target_os = "linux"))]
     {
-        "linux: 规划中(见 docs/04 阶段 2)"
+        "linux: bubblewrap + netns + 授权后重执行(B 契约)"
     }
     #[cfg(all(not(windows), target_os = "macos"))]
     {
-        "macos: 规划中(见 docs/04 阶段 3)"
+        "macos: Seatbelt + 授权后重执行(B 契约)"
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
@@ -24,7 +24,8 @@ pub fn backend_name() -> &'static str {
     }
 }
 
-/// 阶段 0 只有 Windows 后端可用;Linux/macOS 接入后同步放开。
+/// 三平台后端均已接入。
+#[allow(dead_code)]
 pub fn run_supported() -> bool {
-    cfg!(windows)
+    cfg!(any(windows, target_os = "linux", target_os = "macos"))
 }
