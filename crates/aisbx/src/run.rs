@@ -1,6 +1,7 @@
 //! `aisbx run` 编排:策略 -> SID -> ACL -> token -> Job -> broker -> 进程 -> 等待 -> 清理。
 
-use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
 use aisbx_policy::Policy;
 
@@ -87,7 +88,12 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     trace("stage9 wait-child");
     let code = child.wait_exit_code()?;
     trace("stage9b wait-job");
-    unsafe { WaitForSingleObject(jb.handle, INFINITE) };
+    // 有限等待 + 兜底强杀:Job 内进程不收敛时避免无限挂起
+    const WAIT_TIMEOUT_CODE: u32 = 0x0000_0102;
+    if unsafe { WaitForSingleObject(jb.handle, 30_000) } == WAIT_TIMEOUT_CODE {
+        eprintln!("aisbx: 警告: Job 内进程 30s 未收敛,强制终止");
+        unsafe { TerminateJobObject(jb.handle, 1) };
+    }
 
     // 10. 清理:撤 ACL、回收回环例外、关句柄(SID/token/Job 随对象废弃)
     trace("stage10 cleanup");

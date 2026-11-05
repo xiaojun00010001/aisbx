@@ -153,6 +153,7 @@ finally {
 }
 
 Write-Host ""
+Write-Host "SMOKE_DONE fail=$script:fail"
 if ($script:fail -eq 0) { Write-Host "冒烟验证全部通过" -ForegroundColor Green }
 else                    { Write-Host "冒烟验证失败 $script:fail 项" -ForegroundColor Red }
 
