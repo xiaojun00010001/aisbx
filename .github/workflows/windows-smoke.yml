@@ -17,8 +17,18 @@ jobs:
         run: rustc -Vv && cargo -V
 
       - name: Smoke (AppContainer + Job + token 闭环, 18 项断言)
-        shell: powershell
-        run: .\scripts\smoke.ps1
+        shell: pwsh
+        run: |
+          & .\scripts\smoke.ps1 *>&1 | Tee-Object -FilePath smoke.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # 把失败上下文转成 annotation(公开仓库可经 API 读取,无需鉴权拉日志)
+            Get-Content smoke.log | Select-Object -Last 45 | ForEach-Object {
+              $line = ($_ -replace '%','%25') -replace "`r",'%0D'
+              Write-Host "::error title=smoke::$line"
+            }
+          }
+          exit $code
 
       - name: Upload binaries
         if: always()
