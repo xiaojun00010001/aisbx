@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   smoke:
     runs-on: windows-latest
@@ -22,13 +26,25 @@ jobs:
           & .\scripts\smoke.ps1 *>&1 | Tee-Object -FilePath smoke.log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
-            # 把失败上下文转成 annotation(公开仓库可经 API 读取,无需鉴权拉日志)
-            Get-Content smoke.log | Select-Object -Last 45 | ForEach-Object {
-              $line = ($_ -replace '%','%25') -replace "`r",'%0D'
-              Write-Host "::error title=smoke::$line"
-            }
+            Get-Content smoke.log | Select-Object -Last 20 | ForEach-Object { Write-Host "::error::$_" }
           }
           exit $code
+
+      # 失败时把完整日志落到 Issue:公开仓库可经 REST API 无鉴权读取,便于远端诊断
+      - name: Publish failure log
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (-not (Test-Path smoke.log)) { "smoke.log missing" | Out-File smoke.log -Encoding utf8 }
+          $raw = Get-Content smoke.log -Raw
+          if ($raw.Length -gt 60000) { $raw = $raw.Substring($raw.Length - 60000) }
+          $md = "run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID" + "`n`n" + '```text' + "`n" + $raw + "`n" + '```' + "`n"
+          $payload = @{ title = "smoke failure $env:GITHUB_RUN_ID"; body = $md } | ConvertTo-Json -Depth 3
+          Invoke-RestMethod -Method Post -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/issues" `
+            -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" } `
+            -Body $payload -ContentType "application/json" | Out-Null
 
       - name: Upload binaries
         if: always()
