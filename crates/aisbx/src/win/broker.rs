@@ -127,8 +127,12 @@ unsafe fn create_pipe(name: &str, package_sid: &str) -> Result<HANDLE, String> {
         &format!("D:(A;;GA;;;{package_sid})(A;;GA;;;AC)"),
     )?;
     // SDDL 的 S: 段在部分环境下会被静默丢弃(实测回读为 "S:"),这里直接写标签兜底
-    if let Err(e) = apply_low_label(h) {
-        eprintln!("aisbx: 警告: 管道 Low 完整性标签设置失败: {e}");
+    match apply_low_label(h) {
+        Ok(()) => match read_label(h) {
+            Ok(l) => eprintln!("aisbx: 管道标签回读 = {l}"),
+            Err(e) => eprintln!("aisbx: 管道标签回读失败: {e}"),
+        },
+        Err(e) => eprintln!("aisbx: 警告: 管道 Low 完整性标签设置失败: {e}"),
     }
     Ok(h)
 }
@@ -180,6 +184,34 @@ unsafe fn apply_low_label(h: HANDLE) -> Result<(), String> {
         return Err(format!("SetSecurityInfo(label) 失败 win32={rc}"));
     }
     Ok(())
+}
+
+/// 从管道句柄回读强制完整性标签的 SID 字符串(取证:确认 Low 标签是否真的生效)。
+unsafe fn read_label(h: HANDLE) -> Result<String, String> {
+    use windows_sys::Win32::Security::Authorization::GetSecurityInfo;
+    use windows_sys::Win32::Security::{ACL, LABEL_SECURITY_INFORMATION};
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let rc = GetSecurityInfo(
+        h,
+        6, // SE_KERNEL_OBJECT
+        LABEL_SECURITY_INFORMATION,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        &mut sacl,
+        &mut sd,
+    );
+    if rc != 0 {
+        return Err(format!("GetSecurityInfo win32={rc}"));
+    }
+    let mut out = String::from("(empty)");
+    if !sacl.is_null() {
+        let count = (*sacl).AceCount;
+        out = format!("ace_count={count}");
+    }
+    windows_sys::Win32::Foundation::LocalFree(sd as _);
+    Ok(out)
 }
 
 /// 启用 SeSecurityPrivilege(管理员的该特权默认处于禁用态)。
@@ -550,7 +582,26 @@ pub fn escalate_client(policy: &Policy, path: &str, access: &str, token: &str) -
         );
         if h == INVALID_HANDLE_VALUE {
             let err = windows_sys::Win32::Foundation::GetLastError();
-            return Err(format!("无法连接授权管道 {name}(不在沙箱内或 broker 未运行) GetLastError={err}"));
+            // 探针:改以只读打开。只读成功而读写失败 = 完整性标签(IL)拦截;
+            // 只读也被拒 = DACL / AppContainer 校验未通过。
+            let h_ro = CreateFileW(
+                name_w.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_NONE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                0,
+            );
+            let ro = if h_ro == INVALID_HANDLE_VALUE {
+                format!("denied({})", windows_sys::Win32::Foundation::GetLastError())
+            } else {
+                CloseHandle(h_ro);
+                "ok".to_string()
+            };
+            return Err(format!(
+                "无法连接授权管道 {name}(不在沙箱内或 broker 未运行) GetLastError={err}; 只读探针={ro}"
+            ));
         }
         let req = serde_json::json!({
             "op": "file", "path": path, "access": access, "token": token,
