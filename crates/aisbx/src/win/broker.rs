@@ -109,8 +109,11 @@ unsafe fn control_server_loop(policy: &Policy, stop: &AtomicBool, tokens: &Token
 }
 
 unsafe fn create_pipe(name: &str, package_sid: &str) -> Result<HANDLE, String> {
-    // DACL 仅授予 package SID:沙箱里只有本任务进程树能打开这条管道
-    create_pipe_sddl(name, &format!("D:(A;;GA;;;{package_sid})"))
+    // DACL 仅授予 package SID:沙箱里只有本任务进程树能打开这条管道。
+    // SACL 必须显式给 Low 强制标签(S-1-16-4096):否则管道默认 Medium IL +
+    // NO_WRITE_UP,低完整性的 AppContainer 子进程打开即 ACCESS_DENIED(GetLastError=5)。
+    // NW = NO_WRITE_UP 只限制"低写高",对象自身是 Low 时 Low 客户端可正常读写。
+    create_pipe_sddl(name, &format!("D:(A;;GA;;;{package_sid})S:(ML;;NW;;;LW)"))
 }
 
 unsafe fn create_pipe_sddl(name: &str, sddl: &str) -> Result<HANDLE, String> {
