@@ -14,4 +14,8 @@ path = "src/main.rs"
 aisbx-policy = { path = "../aisbx-policy" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# 平台专属依赖按 target 分区:非 Windows 构建不再解析/编译 windows-sys。
+# Linux/macOS 后端依赖(nix/libc)在阶段 2/3 随实现引入,见 docs/04 §5.4。
+[target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }

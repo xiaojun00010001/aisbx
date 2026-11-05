@@ -1,3 +1,4 @@
+mod backend;
 mod common;
 
 use common::load_policy;
@@ -25,7 +26,9 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
         Some("escalate") => cmd_escalate(rest_after(args, 1)),
         Some("authorize") => cmd_authorize(rest_after(args, 1)),
         Some("--help") | Some("-h") | Some("help") | None => {
-            println!("aisbx - agent 本地沙箱 (Windows: AppContainer + Job Object + 授权 broker)");
+            println!("aisbx - agent 本地沙箱 (后端: {})", backend::backend_name());
+            println!("  run / escalate / authorize / policy-check  (当前可用后端: {})",
+                if backend::run_supported() { "是" } else { "否,见 docs/04 阶段 2/3" });
             Ok(0)
         }
         Some(other) => Err(format!("未知子命令 {other}")),

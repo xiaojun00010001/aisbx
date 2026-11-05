@@ -9,6 +9,7 @@ pub fn load_policy(file: &str) -> Result<Policy, String> {
 }
 
 /// 展开 %VAR% 形式的环境变量(Windows 习惯写法,非 Windows 也容忍)
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn expand_path(p: &str) -> String {
     if !p.contains('%') {
         return p.to_string();
@@ -38,11 +39,13 @@ pub fn expand_path(p: &str) -> String {
     out
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn expand_all(paths: &[String]) -> Vec<PathBuf> {
     paths.iter().map(|p| PathBuf::from(expand_path(p))).collect()
 }
 
 /// Windows 命令行参数加引号(RC 规则)
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn quote_arg(s: &str) -> String {
     if !s.is_empty() && !s.chars().any(|c| c == ' ' || c == '\t' || c == '"') {
         return s.to_string();

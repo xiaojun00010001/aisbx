@@ -1,0 +1,34 @@
+name: cross-platform-check
+
+# 阶段 0:只做三平台编译与契约单测,不跑沙箱(内核行为由各平台 smoke 验证)。
+# 见 docs/04-跨平台实现方案.md §5.8 / §6 阶段 0。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: rustc -Vv && cargo -V
+
+      - name: Policy contract tests
+        run: cargo test -p aisbx-policy
+
+      - name: Cargo check (all targets)
+        run: cargo check --all-targets
+
+      - name: Backend report (binary links and reports its backend)
+        run: cargo run --quiet --bin aisbx -- --help
