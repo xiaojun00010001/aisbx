@@ -1,0 +1,4 @@
+/target
+/verify-shared
+*.log
+.DS_Store

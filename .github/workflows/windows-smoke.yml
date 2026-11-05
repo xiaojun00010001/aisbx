@@ -1,0 +1,31 @@
+name: windows-smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustc -Vv && cargo -V
+
+      - name: Smoke (AppContainer + Job + token 闭环, 18 项断言)
+        shell: powershell
+        run: .\scripts\smoke.ps1
+
+      - name: Upload binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aisbx-windows-binaries
+          path: |
+            target/release/aisbx.exe
+            target/release/examples/burn.exe
+          if-no-files-found: ignore

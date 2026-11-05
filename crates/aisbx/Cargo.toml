@@ -1,0 +1,17 @@
+[package]
+name = "aisbx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "面向 agent 框架的 Windows 本地沙箱:AppContainer(LowBox token) + Job Object + 授权 broker"
+default-run = "aisbx"
+
+[[bin]]
+name = "aisbx"
+path = "src/main.rs"
+
+[dependencies]
+aisbx-policy = { path = "../aisbx-policy" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+windows-sys = { workspace = true }

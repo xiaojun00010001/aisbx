@@ -1,0 +1,37 @@
+{
+  "task": "task-42",
+  "filesystem": {
+    "write": [
+      "C:\\agent\\workspace\\task-42",
+      "%TEMP%"
+    ],
+    "read": [
+      "C:\\agent\\sdk"
+    ],
+    "deny_escalation": [
+      "C:\\ProgramData\\ssh",
+      "%USERPROFILE%\\.ssh",
+      "%USERPROFILE%\\.aws",
+      "%WINDIR%\\System32\\config"
+    ],
+    "allow_escalation": [
+      "%USERPROFILE%\\.cargo\\registry"
+    ],
+    "escalation": "prompt"
+  },
+  "network": {
+    "loopback": true,
+    "internet": false
+  },
+  "resources": {
+    "memory_mb_per_process": 512,
+    "memory_mb_total": 2048,
+    "cpu_percent": 50,
+    "active_processes": 32,
+    "max_iops": 100
+  },
+  "broker": {
+    "audit_log": "C:\\agent\\audit\\task-42.jsonl",
+    "pipe_name": null
+  }
+}
