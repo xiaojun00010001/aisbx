@@ -65,7 +65,7 @@ try {
 
   # ── T1 文件默认隔离 ──────────────────────────────────────────────
   Write-Host "== T1 文件默认隔离 =="
-  & $bin run -p $p1 -- "$ws\burn.exe" write "$out\f1.txt" 2>$null
+  & $bin run -p $p1 -- "$ws\burn.exe" write "$out\f1.txt"
   Assert "T1a 白名单外写入被拒(退出码非 0)" ($LASTEXITCODE -ne 0)
   Assert "T1b 白名单外文件未落盘" (-not (Test-Path "$out\f1.txt"))
   & $bin run -p $p1 -- "$ws\burn.exe" write "$ws\f1.txt"
@@ -75,7 +75,7 @@ try {
   # broker 生命周期 = 一次 run,故 token 必须在 run 存活期间由宿主签发。
   Write-Host "== T2 token 授权闭环 =="
   # T2a: deny 模式下无 token 提权必须失败
-  & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f2.txt" --access write 2>$null
+  & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f2.txt" --access write
   Assert "T2a 无 token 提权被拒(deny 模式)" ($LASTEXITCODE -ne 0)
 
   # T2b~T2e: 后台 run 保活 broker -> 宿主 authorize -> 沙箱内消费/写入/重放
@@ -118,9 +118,9 @@ try {
   Write-Host "== T3 资源限制(单进程 64MB / 全任务 256MB / 进程数 10) =="
   & $bin run -p $p1 -- "$ws\burn.exe" mem 32
   Assert "T3a 配额内分配成功" ($LASTEXITCODE -eq 0)
-  & $bin run -p $p1 -- "$ws\burn.exe" mem 512 2>$null
+  & $bin run -p $p1 -- "$ws\burn.exe" mem 512
   Assert "T3b 单进程内存超限被发现(退出码非 0)" ($LASTEXITCODE -ne 0)
-  & $bin run -p $p1 -- "$ws\burn.exe" fork 40 2>$null
+  & $bin run -p $p1 -- "$ws\burn.exe" fork 40
   Assert "T3c fork 超过 active_processes=10 被掐" ($LASTEXITCODE -eq 2)
 
   # ── T4 网络 ──────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ try {
     Start-Sleep -Milliseconds 800
     & $bin run -p $p1 -- "$ws\burn.exe" conn 127.0.0.1 $port
     Assert "T4a 回环放行" ($LASTEXITCODE -eq 0)
-    & $bin run -p $p1 -- "$ws\burn.exe" conn 1.1.1.1 53 2>$null
+    & $bin run -p $p1 -- "$ws\burn.exe" conn 1.1.1.1 53
     Assert "T4b 外网无 capability 被内核拒绝" ($LASTEXITCODE -ne 0)
     Stop-Job $job -ErrorAction SilentlyContinue; Remove-Job $job -Force -ErrorAction SilentlyContinue
     if (-not $isAdmin) { Warn "非管理员:CheckNetIsolation 回环例外可能写入失败,T4a 结果仅供参考(GitHub Actions runner 为管理员)" }

@@ -15,7 +15,7 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     let emit = |e: serde_json::Value| if json { println!("{e}"); };
 
     // 1. 任务级 package SID(一次任务一次,token/Job/ACL/授权缓存全部挂在这上面)
-    let package_sid = token::generate_package_sid(&policy.task);
+    let package_sid = token::generate_package_sid(&policy.task)?;
     emit(serde_json::json!({"event": "sid", "sid": &package_sid}));
 
     // 2. 路径展开

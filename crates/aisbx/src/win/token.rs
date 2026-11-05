@@ -6,9 +6,11 @@
 use windows_sys::Win32::Foundation::{
     CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree, NTSTATUS, PSID,
 };
-use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
+use windows_sys::core::PWSTR;
+use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
 use windows_sys::Win32::Security::{
-    DuplicateTokenEx, SetTokenInformation, SID_AND_ATTRIBUTES, TokenIntegrityLevel,
+    DuplicateTokenEx, FreeSid, SetTokenInformation, SID_AND_ATTRIBUTES, TokenIntegrityLevel,
     TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -31,25 +33,43 @@ extern "system" {
     ) -> NTSTATUS;
 }
 
-/// 生成任务级 package SID:S-1-15-3-4096-<4 个随机子授权>
-/// 随机源 = 时间纳秒 + pid + task 混合(MVP 足够;生产可换 CSPRNG)
-pub fn generate_package_sid(task: &str) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let pid = std::process::id() as u64;
-    let mut state = nanos ^ (pid << 32) ^ task_hash(task);
-    let mut sub = [0u32; 4];
-    for s in sub.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        *s = (state >> 16) as u32;
+/// 任务级 package SID。
+///
+/// AppContainer 的 package SID 必须是 `S-1-15-2-*` 形态;`S-1-15-3-*` 是
+/// capability SID,直接传给 NtCreateLowBoxToken 会被判 STATUS_INVALID_PARAMETER
+/// (0xC000000D)。这里用系统派生函数从名称推导,保证结构合法。
+///
+/// 名称由 task 稳定派生(同一任务多次 run 得到同一 SID),这样回环例外表
+/// 可以"先删后加",不会随运行次数累积到系统上限。
+pub fn generate_package_sid(task: &str) -> Result<String, String> {
+    let name = format!("aisbx.{}", sanitize_name(task));
+    unsafe {
+        let w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut sid: PSID = std::ptr::null_mut();
+        let hr = DeriveAppContainerSidFromAppContainerName(w.as_ptr(), &mut sid);
+        if hr < 0 || sid.is_null() {
+            return Err(format!("DeriveAppContainerSidFromAppContainerName 失败 HRESULT=0x{hr:08X}"));
+        }
+        let mut raw: PWSTR = std::ptr::null_mut();
+        if ConvertSidToStringSidW(sid, &mut raw) == 0 || raw.is_null() {
+            FreeSid(sid);
+            return Err("ConvertSidToStringSidW 失败".into());
+        }
+        let len = (0..512).take_while(|&i| *raw.add(i) != 0).count();
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(raw, len));
+        LocalFree(raw as *mut std::ffi::c_void);
+        FreeSid(sid);
+        Ok(s)
     }
-    format!("S-1-15-3-4096-{}-{}-{}-{}", sub[0], sub[1], sub[2], sub[3])
 }
 
-fn task_hash(t: &str) -> u64 {
-    t.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+/// AppContainer 名称限 ASCII 且长度有上限(64),非法字符统一替换为 `-`。
+fn sanitize_name(t: &str) -> String {
+    let s: String = t
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
+        .collect();
+    s.chars().take(48).collect()
 }
 
 /// SID 字符串 -> PSID(返回 (PSID, 待 LocalFree 的指针))
