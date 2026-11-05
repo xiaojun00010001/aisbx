@@ -114,17 +114,19 @@ unsafe fn control_server_loop(policy: &Policy, stop: &AtomicBool, tokens: &Token
 }
 
 unsafe fn create_pipe(name: &str, package_sid: &str) -> Result<HANDLE, String> {
-    // DACL 仅授予 package SID:沙箱里只有本任务进程树能打开这条管道。
-    // SACL 必须显式给 Low 强制标签(S-1-16-4096):否则管道默认 Medium IL +
-    // NO_WRITE_UP,低完整性的 AppContainer 子进程打开即 ACCESS_DENIED(GetLastError=5)。
-    // NW = NO_WRITE_UP 只限制"低写高",对象自身是 Low 时 Low 客户端可正常读写。
-    // 注意:SACL 能否写进 SD 依赖 SeSecurityPrivilege 已启用(见 start_server)。
+    // DACL = 用户 SID(标准检查) + package SID(AppContainer 校验),缺一不可。
+    // SACL Low 强制标签必需:否则默认 Medium IL + NO_WRITE_UP 会拒低完整性子进程。
+    // SDDL 的 S: 段可能被静默丢弃,故在下方用 SetSecurityInfo 显式写标签。
     // AC(ALL APPLICATION PACKAGES) 兜底:某些内核版本对 LowBox token 的
     // package SID DACL 匹配存在差异,连不上时退而求其次(管道名含任务随机段,
     // 协议层还有 token 一次性校验兜底)。
+    // 常规 DACL 检查看 token 的 user/groups,AppContainer 校验另看 package SID,
+    // 两者都要有 ACE:文件侧 icacls 是"追加"(原用户 ACE 仍在),管道 SD 是全新的,
+    // 只写 package SID 会让标准 DACL 检查直接失败(GetLastError=5)。
+    let user_sid = super::token::current_user_sid()?;
     let h = create_pipe_sddl(
         name,
-        &format!("D:(A;;GA;;;{package_sid})(A;;GA;;;AC)"),
+        &format!("D:(A;;GA;;;{user_sid})(A;;GA;;;{package_sid})"),
     )?;
     // SDDL 的 S: 段在部分环境下会被静默丢弃(实测回读为 "S:"),这里直接写标签兜底
     match apply_low_label(h) {

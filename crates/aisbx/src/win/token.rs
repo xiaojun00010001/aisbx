@@ -174,6 +174,40 @@ unsafe fn set_low_integrity(token: HANDLE) -> Result<(), String> {
     Ok(())
 }
 
+/// 当前进程令牌的用户 SID 字符串。
+///
+/// LowBox token 的常规组里并不包含 package SID(它只参与额外的 AppContainer
+/// 校验),因此管道 DACL 必须同时授予用户 SID 才能通过标准 DACL 检查。
+/// 沙箱令牌由本进程令牌复制而来,user SID 一致。
+pub unsafe fn current_user_sid() -> Result<String, String> {
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    let mut h: HANDLE = 0;
+    if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut h) == 0 {
+        return Err("OpenProcessToken 失败".into());
+    }
+    let mut need: u32 = 0;
+    GetTokenInformation(h, TokenUser, std::ptr::null_mut(), 0, &mut need);
+    if need == 0 {
+        CloseHandle(h);
+        return Err("GetTokenInformation(TokenUser) 取长度失败".into());
+    }
+    let mut buf = vec![0u8; need as usize];
+    let ok = GetTokenInformation(h, TokenUser, buf.as_mut_ptr() as *mut _, need, &mut need);
+    CloseHandle(h);
+    if ok == 0 {
+        return Err("GetTokenInformation(TokenUser) 失败".into());
+    }
+    let tu = &*(buf.as_ptr() as *const TOKEN_USER);
+    let mut raw: PWSTR = std::ptr::null_mut();
+    if ConvertSidToStringSidW(tu.User.Sid, &mut raw) == 0 || raw.is_null() {
+        return Err("ConvertSidToStringSidW(user) 失败".into());
+    }
+    let len = (0..512).take_while(|&i| *raw.add(i) != 0).count();
+    let s = String::from_utf16_lossy(std::slice::from_raw_parts(raw, len));
+    LocalFree(raw as *mut std::ffi::c_void);
+    Ok(s)
+}
+
 pub unsafe fn drop_token(h: HANDLE) {
     if h != 0 && h != INVALID_HANDLE_VALUE {
         CloseHandle(h);
