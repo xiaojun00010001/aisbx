@@ -231,6 +231,9 @@ try {
     Assert "T8d net.grant 已落审计" ((Test-Path $a8) -and (Select-String -Path $a8 -Pattern '"event":"net.grant"' -Quiet))
 
     # ── T9 契约边界与安全断言 ────────────────────────────────────────
+    # 单独兜底:任何 PowerShell 异常都要落到断言计数,不能让脚本静默中断
+    # (否则 CI 只会看到 exit 1,日志里连 SMOKE_DONE 都没有)。
+    try {
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T9 契约边界与安全断言 =="
     $p9 = Join-Path $root "p9.json"; $a9 = Join-Path $root "p9.audit.jsonl"
     @{
@@ -269,16 +272,22 @@ try {
     # T9c 两个并发任务的审计不得串台
     $p9a = Join-Path $root "p9a.json"; $a9a = Join-Path $root "p9a.audit.jsonl"
     $p9b = Join-Path $root "p9b.json"; $a9b = Join-Path $root "p9b.audit.jsonl"
-    foreach ($pair in @(@($p9a,$a9a,"smoke9a-$PID"), @($p9b,$a9b,"smoke9b-$PID"))) {
-      @{
-        task       = $pair[2]
-        filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
-                        allow_escalation = @(); escalation = "deny" }
-        network    = @{ loopback = $true; internet = $false }
-        resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
-        broker     = @{ audit_log = $pair[1] }
-      } | ConvertTo-Json -Depth 5 | Set-Content $pair[0] -Encoding UTF8
-    }
+    @{
+      task       = "smoke9a-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
+      broker     = @{ audit_log = $a9a }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p9a -Encoding UTF8
+    @{
+      task       = "smoke9b-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
+      broker     = @{ audit_log = $a9b }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p9b -Encoding UTF8
     $procA = Start-Process -FilePath $bin -NoNewWindow -PassThru `
       -RedirectStandardOutput "$ws\a9.out" -RedirectStandardError "$ws\a9.err" `
       -ArgumentList @('run','-p',$p9a,'--',"$ws\burn.exe",'write',"$ws\a9.txt")
@@ -286,10 +295,11 @@ try {
       -RedirectStandardOutput "$ws\b9.out" -RedirectStandardError "$ws\b9.err" `
       -ArgumentList @('run','-p',$p9b,'--',"$ws\burn.exe",'write',"$ws\b9.txt")
     $null = $procA.WaitForExit(30000); $null = $procC.WaitForExit(30000)
-    $okC = (Select-String -Path $a9a -Pattern 'a9.txt' -Quiet) `
-      -and (-not (Select-String -Path $a9a -Pattern 'b9.txt' -Quiet)) `
-      -and (Select-String -Path $a9b -Pattern 'b9.txt' -Quiet) `
-      -and (-not (Select-String -Path $a9b -Pattern 'a9.txt' -Quiet))
+    $okC = (Test-Path $a9a) -and (Test-Path $a9b) `
+      -and (Select-String -Path $a9a -Pattern 'a9.txt' -Quiet -ErrorAction SilentlyContinue) `
+      -and (-not (Select-String -Path $a9a -Pattern 'b9.txt' -Quiet -ErrorAction SilentlyContinue)) `
+      -and (Select-String -Path $a9b -Pattern 'b9.txt' -Quiet -ErrorAction SilentlyContinue) `
+      -and (-not (Select-String -Path $a9b -Pattern 'a9.txt' -Quiet -ErrorAction SilentlyContinue))
     Assert "T9c 并发任务审计不串台" $okC
 
     # T9d 代理拒绝 loopback 目标(防 SSRF)
@@ -299,6 +309,11 @@ try {
     # T9e 能力报告关键字段完整(避免静默降级)
     Assert "T9e 能力报告含采集能力与代理协议字段" `
       ($capRaw -match '"net_proxy"' -and $capRaw -match '"auto_violation_capture"')
+    } catch {
+      Warn "T9 段异常: $_"
+      $script:rows += "| T9 段异常(未跑完) | **FAIL** |"
+      $script:fail++
+    }
   }
 }
 finally {
