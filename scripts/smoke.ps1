@@ -288,19 +288,21 @@ try {
       resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
       broker     = @{ audit_log = $a9b }
     } | ConvertTo-Json -Depth 5 | Set-Content $p9b -Encoding UTF8
+    # Windows 的 --json 事件只 println、不写审计(spawned 不在 audit 里),
+    # 因此用 --json 输出流做串台判定;Unix 侧两者都落审计,见 docs/07。
     $procA = Start-Process -FilePath $bin -NoNewWindow -PassThru `
       -RedirectStandardOutput "$ws\a9.out" -RedirectStandardError "$ws\a9.err" `
-      -ArgumentList @('run','-p',$p9a,'--',"$ws\burn.exe",'write',"$ws\a9.txt")
+      -ArgumentList @('run','--json','-p',$p9a,'--',"$ws\burn.exe",'write',"$ws\a9.txt")
     $procC = Start-Process -FilePath $bin -NoNewWindow -PassThru `
       -RedirectStandardOutput "$ws\b9.out" -RedirectStandardError "$ws\b9.err" `
-      -ArgumentList @('run','-p',$p9b,'--',"$ws\burn.exe",'write',"$ws\b9.txt")
+      -ArgumentList @('run','--json','-p',$p9b,'--',"$ws\burn.exe",'write',"$ws\b9.txt")
     $null = $procA.WaitForExit(30000); $null = $procC.WaitForExit(30000)
-    $okC = (Test-Path $a9a) -and (Test-Path $a9b) `
-      -and (Select-String -Path $a9a -Pattern 'a9.txt' -Quiet -ErrorAction SilentlyContinue) `
-      -and (-not (Select-String -Path $a9a -Pattern 'b9.txt' -Quiet -ErrorAction SilentlyContinue)) `
-      -and (Select-String -Path $a9b -Pattern 'b9.txt' -Quiet -ErrorAction SilentlyContinue) `
-      -and (-not (Select-String -Path $a9b -Pattern 'a9.txt' -Quiet -ErrorAction SilentlyContinue))
-    Assert "T9c 并发任务审计不串台" $okC
+    $okC = (Test-Path "$ws\a9.out") -and (Test-Path "$ws\b9.out") `
+      -and (Select-String -Path "$ws\a9.out" -Pattern 'a9.txt' -Quiet -ErrorAction SilentlyContinue) `
+      -and (-not (Select-String -Path "$ws\a9.out" -Pattern 'b9.txt' -Quiet -ErrorAction SilentlyContinue)) `
+      -and (Select-String -Path "$ws\b9.out" -Pattern 'b9.txt' -Quiet -ErrorAction SilentlyContinue) `
+      -and (-not (Select-String -Path "$ws\b9.out" -Pattern 'a9.txt' -Quiet -ErrorAction SilentlyContinue))
+    Assert "T9c 并发任务事件流不串台" $okC
 
     # T9d 代理拒绝 loopback 目标(防 SSRF)
     & $bin run -p $p9 -- "$ws\burn.exe" proxy 127.0.0.1 443 2>&1 | Out-Null
