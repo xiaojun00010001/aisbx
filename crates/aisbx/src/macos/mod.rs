@@ -1,6 +1,7 @@
 //! macOS 后端(方案 B):Seatbelt 静态 profile + 授权后重执行。
 
 mod seatbelt;
+pub mod violations;
 
 use aisbx_policy::Policy;
 

@@ -27,6 +27,7 @@ fn main() {
             eprintln!("      aisbx escalate -p <policy.json> --path <路径> --access read|write [--token <tok>]");
             eprintln!("      aisbx escalate --op net --host <host> --ip <ip> --port <port>");
             eprintln!("      aisbx authorize -p <policy.json> --path <路径> --access read|write [--ttl-seconds 300]");
+            eprintln!("      aisbx authorize -p <policy.json> --host <域名> [--port 443]  # 放行代理观察到的目标(仅本次任务)");
             eprintln!("      aisbx capabilities [--json]");
             eprintln!("      aisbx policy-check -p <policy.json>");
             2
@@ -55,6 +56,26 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
             #[cfg(not(target_os = "linux"))]
             {
                 Err("__linux_helper 仅用于 Linux".into())
+            }
+        }
+        Some("__unix_entry") => {
+            #[cfg(unix)]
+            {
+                return unix::relay::entry(rest_after(args, 1));
+            }
+            #[cfg(not(unix))]
+            {
+                Err("__unix_entry 仅用于 Unix".into())
+            }
+        }
+        Some("__relay_only") => {
+            #[cfg(unix)]
+            {
+                return unix::relay::relay_only(rest_after(args, 1));
+            }
+            #[cfg(not(unix))]
+            {
+                Err("__relay_only 仅用于 Unix".into())
             }
         }
         Some("--help") | Some("-h") | Some("help") | None => {
@@ -173,6 +194,7 @@ fn cmd_escalate(args: &[String]) -> Result<i32, String> {
                 .unwrap_or(0),
             token,
             command_id: std::env::var("AISBX_COMMAND_ID").unwrap_or_default(),
+            pid: 0,
             requested_by: serde_json::json!({
                 "pid": std::process::id(),
                 "exe": std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default()
@@ -191,7 +213,32 @@ fn cmd_escalate(args: &[String]) -> Result<i32, String> {
 /// 宿主侧:agent 框架取得用户同意后调用,向运行中的 broker 签发一次性授权 token。
 fn cmd_authorize(args: &[String]) -> Result<i32, String> {
     let policy_file = policy_arg(args)?;
-    let path = flag_value(args, "--path").ok_or("缺少 --path")?;
+    let policy = load_policy(&policy_file)?;
+
+    // P0:放行代理真实观察到的网络目标(仅本次任务,运行中即时生效,不需重跑)。
+    if let Some(host) = flag_value(args, "--host") {
+        let port: u16 = flag_value(args, "--port")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(443);
+        if host.is_empty() || port == 0 {
+            return Err("--host/--port 非法".into());
+        }
+        #[cfg(windows)]
+        {
+            return crate::win::netproxy::authorize_net_client(&policy, &host, port);
+        }
+        #[cfg(unix)]
+        {
+            return unix::broker::authorize_net_client(&policy, &host, port);
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = (policy, host, port);
+            return Err("authorize --host 仅支持 Windows/Linux/macOS".into());
+        }
+    }
+
+    let path = flag_value(args, "--path").ok_or("缺少 --path 或 --host")?;
     let access = flag_value(args, "--access").unwrap_or_else(|| "write".into());
     if !matches!(access.as_str(), "read" | "write") {
         return Err("--access 只允许 read|write".into());
@@ -199,7 +246,6 @@ fn cmd_authorize(args: &[String]) -> Result<i32, String> {
     let ttl: u64 = flag_value(args, "--ttl-seconds")
         .and_then(|v| v.parse().ok())
         .unwrap_or(300);
-    let policy = load_policy(&policy_file)?;
 
     #[cfg(windows)]
     {

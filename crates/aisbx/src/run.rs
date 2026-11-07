@@ -8,7 +8,7 @@ use windows_sys::Win32::System::Threading::WaitForSingleObject;
 use aisbx_policy::Policy;
 
 use crate::common::expand_all;
-use crate::win::{acl, broker, job, loopback, proc, token};
+use crate::win::{acl, broker, job, loopback, netproxy, proc, token};
 
 /// capability SID 常量表(well-known)
 const CAP_INTERNET_CLIENT: &str = "S-1-15-3-1";
@@ -77,7 +77,14 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
 
     // 7. broker 管道(必须先于进程,沙箱内才能连上)
     trace("stage7 broker");
-    let _stop = broker::start_server(policy, &package_sid);
+    let broker = broker::start_server(policy, &package_sid);
+
+    // 7b. P0 网络代理:宿主回环监听 + 注入代理环境变量。
+    //     AppContainer 已有回环例外,沙箱内程序通过 HTTP(S)_PROXY 连到宿主代理,
+    //     代理从 CONNECT 拿到真实 host:port,不需要程序改造、不需要解析命令。
+    let netproxy = netproxy::start(broker.net_state.clone(), broker.audit.clone())?;
+    let saved_env = install_proxy_env(netproxy.port);
+    emit(serde_json::json!({"event": "proxy", "port": netproxy.port, "mode": "http-connect"}));
 
     // 8. 创建(挂起) -> 入 Job -> 恢复
     trace("stage8 spawn");
@@ -119,8 +126,11 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
         }
     }
 
-    // 10. 清理:撤 ACL、回收回环例外、关句柄(SID/token/Job 随对象废弃)
+    // 10. 清理:撤 ACL、回收回环例外、恢复环境、关句柄(SID/token/Job 随对象废弃)
     trace("stage10 cleanup");
+    restore_proxy_env(saved_env);
+    drop(netproxy);
+    let _ = &broker; // 句柄内的 stop 在 run_windows 返回时统一释放
     for p in &granted_paths {
         acl::revoke(&package_sid, p);
     }
@@ -130,4 +140,34 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     unsafe { token::drop_token(h_token) };
     emit(serde_json::json!({"event": "exit", "code": code}));
     Ok(code as i32)
+}
+
+const PROXY_KEYS: &[&str] = &[
+    "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+    "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+];
+
+/// CreateProcessAsUserW 传 NULL 环境 = 继承宿主环境,因此 set_var 即可注入代理变量。
+/// 返回原值,任务结束后恢复,避免污染宿主线程后续任务。
+fn install_proxy_env(port: u16) -> Vec<(&'static str, Option<String>)> {
+    let saved: Vec<(&'static str, Option<String>)> = PROXY_KEYS
+        .iter()
+        .map(|k| (*k, std::env::var(k).ok()))
+        .collect();
+    let proxy = format!("http://127.0.0.1:{port}");
+    for k in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+        std::env::set_var(k, &proxy);
+    }
+    std::env::set_var("NO_PROXY", "localhost,127.0.0.1,::1");
+    std::env::set_var("no_proxy", "localhost,127.0.0.1,::1");
+    saved
+}
+
+fn restore_proxy_env(saved: Vec<(&'static str, Option<String>)>) {
+    for (k, v) in saved {
+        match v {
+            Some(x) => std::env::set_var(k, x),
+            None => std::env::remove_var(k),
+        }
+    }
 }

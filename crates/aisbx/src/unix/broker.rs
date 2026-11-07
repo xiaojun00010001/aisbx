@@ -37,17 +37,34 @@ impl Broker {
         }
         let esc_path = dir.join("esc.sock");
         let ctl_path = dir.join("ctl.sock");
-        let _ = std::fs::remove_file(&esc_path);
-        let _ = std::fs::remove_file(&ctl_path);
+        let net_path = dir.join("net.sock");
+        for p in [&esc_path, &ctl_path, &net_path] {
+            let _ = std::fs::remove_file(p);
+        }
 
         let state = Arc::new(Mutex::new(State::new(policy.clone(), command_id.to_string())));
         let stop = Arc::new(AtomicBool::new(false));
 
         let esc = bind(&esc_path)?;
         let ctl = bind(&ctl_path)?;
+        let net = bind(&net_path)?;
         spawn_server(esc, state.clone(), stop.clone(), false);
         spawn_server(ctl, state.clone(), stop.clone(), true);
+        super::netproxy::spawn_server(net, state.clone(), stop.clone());
         Ok(Self { state, dir, stop })
+    }
+
+    /// 取走后台线程排队的事件,由 launcher 统一 emit(--json 单行事件流)。
+    pub fn drain_events(&self) -> Vec<Value> {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        std::mem::take(&mut s.events)
+    }
+
+    /// 沙箱入口 PID + 它登记的真实目标进程 PID。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn sandbox_pids(&self) -> Vec<u32> {
+        let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.child_pids.clone()
     }
 
     pub fn snapshot(&self) -> RunSnapshot {
@@ -82,6 +99,7 @@ impl Drop for Broker {
         self.stop.store(true, Ordering::Relaxed);
         let _ = std::fs::remove_file(self.dir.join("esc.sock"));
         let _ = std::fs::remove_file(self.dir.join("ctl.sock"));
+        let _ = std::fs::remove_file(self.dir.join("net.sock"));
         let _ = std::fs::remove_dir(&self.dir);
     }
 }
@@ -144,6 +162,13 @@ fn handle_escalate(state: &Arc<Mutex<State>>, line: &str) -> String {
     }
 
     match req.op.as_str() {
+        // 沙箱入口登记真实目标进程 PID(内核违规日志按此归属,避免误判系统进程噪声)
+        "pid" => {
+            if req.pid != 0 && !s.child_pids.contains(&req.pid) {
+                s.child_pids.push(req.pid);
+            }
+            json!({"registered": true, "pid": req.pid}).to_string()
+        }
         "file" => decide_file(&mut s, &req),
         "net" => {
             s.violation(&req, "net", "network-egress-denied");
@@ -246,11 +271,33 @@ fn handle_control(state: &Arc<Mutex<State>>, line: &str) -> String {
             }));
             json!({"granted": true, "token": token, "path": path, "access": access, "expires_in": ttl}).to_string()
         }
+        "net-issue" => {
+            let host = req.get("host").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let port = req.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            if host.is_empty() || port == 0 {
+                return protocol::denied("host/port 非法");
+            }
+            // 必须基于代理真实观察过的拒绝,防止凭空放行一个从未请求过的目标。
+            let observed = s
+                .violations
+                .iter()
+                .any(|v| v.kind == "net" && v.host == host && v.port == port);
+            if !observed {
+                s.emit_event(json!({
+                    "event": "authorize.reject", "op": "net", "host": host,
+                    "port": port, "reason": "no-real-violation"
+                }));
+                return protocol::denied("无真实网络拒绝记录,拒绝放行");
+            }
+            s.grant_net(&host, port);
+            json!({"granted": true, "host": host, "port": port, "scope": "task"}).to_string()
+        }
         "status" => {
             json!({
                 "attempt": s.attempt,
                 "violations": s.violations.len(),
                 "granted": s.granted,
+                "granted_nets": s.granted_nets,
                 "retries": s.retries
             }).to_string()
         }
@@ -272,6 +319,17 @@ pub fn escalate_client(req: &EscRequest) -> Result<i32, String> {
 pub fn authorize_client(policy: &Policy, path: &str, access: &str, ttl: u64) -> Result<i32, String> {
     let sock = runtime_dir(&policy.task).join("ctl.sock");
     let body = json!({"op":"issue","path":path,"access":access,"ttl_seconds":ttl}).to_string();
+    let reply = request(sock, &body)?;
+    println!("{reply}");
+    let v: Value = serde_json::from_str(&reply).unwrap_or_default();
+    Ok(if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) { 0 } else { 1 })
+}
+
+/// 宿主侧 `aisbx authorize --host <host> --port <port>`:放行代理观察到的目标。
+/// 只影响本次任务的内存白名单,运行中即时生效,不写回基线策略文件、不需要重跑命令。
+pub fn authorize_net_client(policy: &Policy, host: &str, port: u16) -> Result<i32, String> {
+    let sock = runtime_dir(&policy.task).join("ctl.sock");
+    let body = json!({"op":"net-issue","host":host,"port":port}).to_string();
     let reply = request(sock, &body)?;
     println!("{reply}");
     let v: Value = serde_json::from_str(&reply).unwrap_or_default();

@@ -25,6 +25,7 @@ use aisbx_policy::{EscalationMode, Policy};
 
 use super::acl;
 use super::audit::Audit;
+use super::netproxy::NetState;
 use crate::common::expand_path;
 
 /// ── 服务端 ────────────────────────────────────────────────────────────
@@ -39,7 +40,20 @@ pub struct IssuedToken {
     pub expires_at: Instant,
 }
 
-pub fn start_server(policy: &Policy, package_sid: &str) -> Arc<AtomicBool> {
+/// 宿主 broker 的句柄:除停止标志外,还把 P0 网络状态与审计器交给 launcher。
+pub struct BrokerHandle {
+    pub stop: Arc<AtomicBool>,
+    pub net_state: Arc<Mutex<NetState>>,
+    pub audit: Arc<Audit>,
+}
+
+impl Drop for BrokerHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+pub fn start_server(policy: &Policy, package_sid: &str) -> BrokerHandle {
     // SACL(强制完整性标签)要写进管道 SD,ConvertStringSD 要求 SeSecurityPrivilege
     // 处于启用态,否则 SACL 会被【静默丢弃】-> 管道保持默认 Medium IL + NO_WRITE_UP,
     // 低完整性的 AppContainer 子进程一律 ACCESS_DENIED。先提权再建管道。
@@ -58,15 +72,20 @@ pub fn start_server(policy: &Policy, package_sid: &str) -> Arc<AtomicBool> {
         }
     });
     // 宿主控制通道:agent 在运行中签发授权 token 的入口(见 docs/03 §1.5)
+    // 同时承载 P0 的 --host 网络放行,P0 代理与它共享同一份 NetState。
+    let net_state: Arc<Mutex<NetState>> = Arc::new(Mutex::new(NetState::default()));
+    let audit = Arc::new(Audit::new(policy.broker.audit_log.as_deref()));
     let policy3 = policy.clone();
     let stop3 = stop.clone();
     let tokens3 = tokens.clone();
+    let net_state3 = net_state.clone();
+    let audit3 = audit.clone();
     std::thread::spawn(move || unsafe {
-        if let Err(e) = control_server_loop(&policy3, &stop3, &tokens3) {
+        if let Err(e) = control_server_loop(&policy3, &stop3, &tokens3, &net_state3, &audit3) {
             eprintln!("aisbx: broker 控制管道异常: {e}");
         }
     });
-    stop
+    BrokerHandle { stop, net_state, audit }
 }
 
 unsafe fn server_loop(policy: &Policy, package_sid: &str, stop: &AtomicBool, tokens: &TokenStore) -> Result<(), String> {
@@ -94,10 +113,15 @@ unsafe fn server_loop(policy: &Policy, package_sid: &str, stop: &AtomicBool, tok
 /// 宿主控制通道:DACL 只含 SYSTEM/Administrators/属主(S-1-3-4)。
 /// 沙箱内进程(AppContainer)即使与宿主同属一个用户,也过不了 AppContainer
 /// 附加检查(SD 未授予 package SID),无法自行签发 token——授权决策权在宿主。
-unsafe fn control_server_loop(policy: &Policy, stop: &AtomicBool, tokens: &TokenStore) -> Result<(), String> {
+unsafe fn control_server_loop(
+    policy: &Policy,
+    stop: &AtomicBool,
+    tokens: &TokenStore,
+    net_state: &Arc<Mutex<NetState>>,
+    audit: &Arc<Audit>,
+) -> Result<(), String> {
     let pipe_name = format!(r"\\.\pipe\{}-ctl", policy.pipe_name());
     let h = create_pipe_sddl(&pipe_name, "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-3-4)")?;
-    let audit = Audit::new(policy.broker.audit_log.as_deref());
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -105,7 +129,7 @@ unsafe fn control_server_loop(policy: &Policy, stop: &AtomicBool, tokens: &Token
         if ConnectNamedPipe(h, std::ptr::null_mut()) == 0 {
         }
         if let Some(line) = read_line(h) {
-            let reply = handle_control(&line, tokens, &audit);
+            let reply = handle_control(&line, tokens, net_state, audit);
             write_all(h, (reply + "\n").as_bytes());
         }
         DisconnectNamedPipe(h);
@@ -382,13 +406,50 @@ struct IssueRequest {
     access: String,
     #[serde(default)]
     ttl_seconds: Option<u64>,
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
 }
 
-fn handle_control(line: &str, tokens: &TokenStore, audit: &Audit) -> String {
+fn handle_control(
+    line: &str,
+    tokens: &TokenStore,
+    net_state: &Arc<Mutex<NetState>>,
+    audit: &Arc<Audit>,
+) -> String {
     let req = match serde_json::from_str::<IssueRequest>(line) {
         Ok(r) => r,
         Err(e) => return json_reply(false, &format!("请求解析失败: {e}")),
     };
+
+    // P0:放行代理真实观察过的网络目标。运行中即时生效,不写回策略文件、不需重跑。
+    if req.op == "net-issue" {
+        let port = req.port.unwrap_or(443);
+        if req.host.is_empty() || port == 0 {
+            return json_reply(false, "host/port 非法");
+        }
+        let key = NetState::key(&req.host, port);
+        {
+            let mut ns = net_state.lock().unwrap_or_else(|p| p.into_inner());
+            if !ns.observed.contains(&key) {
+                audit.log(&serde_json::json!({
+                    "event": "authorize.reject", "op": "net", "host": req.host,
+                    "port": port, "reason": "no-real-violation"
+                }));
+                return json_reply(false, "无真实网络拒绝记录,拒绝放行");
+            }
+            if !ns.granted.contains(&key) {
+                ns.granted.push(key.clone());
+            }
+        }
+        audit.log(&serde_json::json!({
+            "event": "net.grant", "host": req.host, "port": port,
+            "target": key, "scope": "task"
+        }));
+        return serde_json::json!({"granted": true, "host": req.host, "port": port, "scope": "task"}).to_string();
+    }
+
     if req.op != "issue" {
         return json_reply(false, &format!("未知控制操作 {}", req.op));
     }

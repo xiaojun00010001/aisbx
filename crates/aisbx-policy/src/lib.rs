@@ -81,6 +81,15 @@ pub struct BrokerPolicy {
     pub audit_log: Option<PathBuf>,
     /// 覆盖 broker 管道名(默认 aisbx-<task>)
     pub pipe_name: Option<String>,
+    /// 启用内核违规日志自动采集(P1)。默认 false:新能力不改变既有行为。
+    /// 目前仅 macOS 的 Seatbelt violation 日志支持,其他平台如实标注 unavailable。
+    pub violation_capture: Option<bool>,
+}
+
+impl BrokerPolicy {
+    pub fn capture_violations(&self) -> bool {
+        self.violation_capture.unwrap_or(false)
+    }
 }
 
 impl Policy {
@@ -195,5 +204,13 @@ mod tests {
     fn pipe_name_override() {
         let p = Policy::parse(r#"{ "task": "t", "broker": { "pipe_name": "custom" } }"#).unwrap();
         assert_eq!(p.pipe_name(), "custom");
+    }
+
+    #[test]
+    fn violation_capture_defaults_off() {
+        let p = Policy::parse(r#"{ "task": "t" }"#).unwrap();
+        assert!(!p.broker.capture_violations());
+        let p = Policy::parse(r#"{ "task": "t", "broker": { "violation_capture": true } }"#).unwrap();
+        assert!(p.broker.capture_violations());
     }
 }

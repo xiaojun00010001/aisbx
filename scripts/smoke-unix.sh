@@ -143,6 +143,80 @@ else
   bad "T5d 能力报告声明 B 契约"
 fi
 
+echo "[$(date +%H:%M:%S)] == T6 网络代理:精确目标自动采集 / 运行中授权 ==" | tee -a "$LOG"
+# burn proxy 只是遵守 HTTPS_PROXY 发一次 CONNECT,不主动上报、不解析命令。
+# 精确 host:port 必须由代理从协议里自己读到。
+P6="$ROOT/p6.json"; A6="$ROOT/p6.audit.jsonl"; TASK6="smoke6-$$"
+python3 - "$P6" "$WS" "$A6" "$TASK6" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit},
+}, open(policy, "w"), indent=2)
+PY
+T6_OUT="$ROOT/t6.out"
+"$BIN" run -p "$P6" --json -- "$BURN" proxy example.com 443 >"$T6_OUT" 2>&1 &
+T6_PID=$!
+for _ in $(seq 1 100); do
+  grep -q '"event":"violation".*"kind":"net"' "$A6" 2>/dev/null && break
+  sleep 0.2
+done
+assert "T6a 代理自动拿到精确 host:port(零解析/零改造)" grep -q '"host":"example.com".*"port":443' "$A6"
+"$BIN" authorize -p "$P6" --host example.com --port 443 >>"$LOG" 2>&1
+wait "$T6_PID"
+T6_RC=$?
+if [[ $T6_RC -eq 0 ]]; then pass "T6b 授权后运行中放行"; else bad "T6b 授权后运行中放行 (rc=$T6_RC)"; fi
+assert "T6c net.grant 已落审计" grep -q '"event":"net.grant"' "$A6"
+if [[ $(grep -c '"event":"spawned"' "$A6") -eq 1 ]]; then
+  pass "T6d 全程只执行一次(网络授权不需重跑)"
+else
+  bad "T6d 全程只执行一次(网络授权不需重跑)"
+fi
+cat "$T6_OUT" >> "$LOG"
+
+echo "[$(date +%H:%M:%S)] == T7 内核违规日志自动采集(按能力报告判定) ==" | tee -a "$LOG"
+CAP_JSON=$("$BIN" capabilities 2>>"$LOG")
+AUTO_CAP=$(printf '%s' "$CAP_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["capabilities"]["auto_violation_capture"])' 2>/dev/null)
+if [[ "$AUTO_CAP" == "full" || "$AUTO_CAP" == "partial" ]]; then
+  # P1 完整闭环:burn write 不调 escalate、不解析命令,精确路径由内核日志自动给出。
+  P7="$ROOT/p7.json"; A7="$ROOT/p7.audit.jsonl"; TASK7="smoke7-$$"
+  python3 - "$P7" "$WS" "$A7" "$TASK7" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PY
+  "$BIN" run -p "$P7" --json -- "$BURN" write "$OUT/t7.txt" >"$ROOT/t7.out" 2>&1 &
+  T7_PID=$!
+  for _ in $(seq 1 100); do
+    grep -q '"event":"violation.captured"' "$A7" 2>/dev/null && break
+    sleep 0.2
+  done
+  assert "T7a 内核日志自动给出精确路径(程序零配合)" grep -q '"event":"violation.captured".*t7.txt' "$A7"
+  assert "T7b violation 标记为内核日志来源" grep -q '"source":"sandbox-log"' "$A7"
+  "$BIN" authorize -p "$P7" --path "$OUT" --access write >>"$LOG" 2>&1
+  wait "$T7_PID"
+  T7_RC=$?
+  if [[ $T7_RC -eq 0 ]]; then pass "T7c 授权后重执行成功"; else bad "T7c 授权后重执行成功 (rc=$T7_RC)"; fi
+  assert "T7d 授权后文件真实落盘" test -f "$OUT/t7.txt"
+  assert "T7e retry 事件已落审计" grep -q '"event":"retry"' "$A7"
+  cat "$ROOT/t7.out" >> "$LOG"
+else
+  assert "T7a 能力报告如实标注自动采集不可用" test "$AUTO_CAP" = "unavailable"
+  warn "T7b 内核违规日志自动采集:该平台不可用,不计失败(见 docs/06)"
+fi
+
 echo "" | tee -a "$LOG"
 echo "SMOKE_DONE fail=$fail" | tee -a "$LOG"
 if [[ $fail -eq 0 ]]; then

@@ -148,6 +148,50 @@ try {
   Assert "T5a token.issued 已落审计" ($events -contains "token.issued")
   Assert "T5b token.redeemed 已落审计" ($events -contains "token.redeemed")
   Assert "T5c escalation.deny 已落审计" ($events -contains "escalation.deny")
+
+  # ── T6 网络代理(P0):精确目标自动采集 / 运行中授权 ─────────────────
+  # burn proxy 只是遵守 HTTPS_PROXY 发一次 CONNECT,不主动上报、不解析命令。
+  if (-not $isAdmin) {
+    Warn "T6 非管理员:CheckNetIsolation 回环例外可能不可用,跳过网络代理断言"
+  } else {
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T6 网络代理(P0) =="
+    $p6 = Join-Path $root "p6.json"
+    $a6 = Join-Path $root "p6.audit.jsonl"
+    @{
+      task       = "smoke6-$PID"
+      filesystem = @{
+        write           = @($ws)
+        read            = @()
+        deny_escalation = @()
+        allow_escalation= @()
+        escalation      = "deny"
+      }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
+      broker     = @{ audit_log = $a6 }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p6 -Encoding UTF8
+
+    $t6out = Join-Path $ws "t6.out"; $t6err = Join-Path $ws "t6.err"
+    $proc6 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -RedirectStandardOutput $t6out -RedirectStandardError $t6err `
+      -ArgumentList @('run', '-p', $p6, '--', "$ws\burn.exe", 'proxy', 'example.com', '443')
+    for ($i = 0; $i -lt 100; $i++) {
+      if ((Test-Path $a6) -and (Select-String -Path $a6 -Pattern '"event":"violation"' -Quiet)) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    $hasTarget = (Test-Path $a6) `
+      -and (Select-String -Path $a6 -Pattern '"host":"example.com"' -Quiet) `
+      -and (Select-String -Path $a6 -Pattern '"port":443' -Quiet)
+    Assert "T6a 代理自动拿到精确 host:port(零解析/零改造)" $hasTarget
+
+    $auth6 = (& $bin authorize -p $p6 --host example.com --port 443) | Out-String
+    Assert "T6b authorize --host 放行" ($LASTEXITCODE -eq 0 -and $auth6 -match '"granted":\s*true')
+    if (-not $proc6.WaitForExit(60000)) { $proc6.Kill(); Write-Host "T6 run 60s 未退出,已强杀" }
+    $r6 = @(Get-Content $t6out, $t6err -ErrorAction SilentlyContinue) -join "`n"
+    Write-Host ($r6.Trim())
+    Assert "T6c 授权后运行中放行(proxy_status=200)" ($r6 -match "proxy_status=200")
+    Assert "T6d net.grant 已落审计" ((Test-Path $a6) -and (Select-String -Path $a6 -Pattern '"event":"net.grant"' -Quiet))
+  }
 }
 finally {
   Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue

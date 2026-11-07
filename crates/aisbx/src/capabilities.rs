@@ -31,7 +31,9 @@ pub fn report() -> Value {
                 "cpu": "full",
                 "process_limit": "full",
                 "process_tree_kill": "full",
-                "auto_violation_capture": "unavailable"
+                "auto_violation_capture": "unavailable",
+                "net_violation_capture": "partial",
+                "net_proxy": "http-connect"
             }
         })
     }
@@ -53,7 +55,13 @@ pub fn report() -> Value {
                 "cpu": "unavailable",
                 "process_limit": "unavailable",
                 "process_tree_kill": "partial",
-                "auto_violation_capture": "unavailable",
+                // P1 实测(2026-11-07, macOS 26.3):入口 exec 目标命令后,Seatbelt
+                // violation 日志能稳定给出精确路径并驱动授权重跑。标 partial 而非 full:
+                // 需策略显式开启、依赖日志秒级落盘与时间窗、仅归属登记 PID、深层子进程会漏。
+                "auto_violation_capture": if sb { "partial" } else { "unavailable" },
+                "violation_log_probe": "sandbox-reporting-violation",
+                "net_violation_capture": "partial",
+                "net_proxy": "http-connect",
                 "seatbelt": if sb { "full" } else { "unavailable" }
             }
         })
@@ -80,6 +88,8 @@ pub fn report() -> Value {
                 "process_limit": "unavailable",
                 "process_tree_kill": "partial",
                 "auto_violation_capture": "unavailable",
+                "net_violation_capture": if bwrap { "partial" } else { "unavailable" },
+                "net_proxy": "http-connect",
                 "bubblewrap": if bwrap { "full" } else { "unavailable" },
                 "landlock": if landlock { "partial" } else { "unavailable" },
                 "seccomp": if bwrap { "partial" } else { "unavailable" }

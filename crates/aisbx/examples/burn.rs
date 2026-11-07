@@ -10,13 +10,17 @@ fn main() {
         Some("write") => write(args.get(1).map(|s| s.as_str()).unwrap_or("")),
         Some("flow") => flow(&args[1..]),
         Some("retryflow") => retryflow(&args[1..]),
+        Some("proxy") => proxy(
+            args.get(1).map(|s| s.as_str()).unwrap_or(""),
+            args.get(2).and_then(|v| v.parse().ok()).unwrap_or(443),
+        ),
         Some("loopback") => loopback(),
         Some("conn") => conn(
             args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1"),
             args.get(2).and_then(|v| v.parse().ok()).unwrap_or(80),
         ),
         _ => {
-            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | conn <host> <port> | flow <policy> <tokenFile> <target> <grant|deny>");
+            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | conn <host> <port> | proxy <host> <port> | flow <policy> <tokenFile> <target> <grant|deny>");
             2
         }
     };
@@ -150,6 +154,56 @@ fn flow(args: &[String]) -> i32 {
         1
     } else {
         0
+    }
+}
+
+/// P0 验证载荷:模拟「遵守代理环境变量的程序」,发一次 HTTP CONNECT。
+/// 不解析命令、不主动上报——目标 host:port 由代理从 CONNECT 报文中自己读到。
+/// 退出码:200=0(已放行),403=3(等待授权超时/拒绝),其它=1,无代理=2。
+fn proxy(host: &str, port: u16) -> i32 {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let p = std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .unwrap_or_default();
+    if p.is_empty() || host.is_empty() {
+        eprintln!("proxy: 缺少 HTTPS_PROXY 或 host(不在沙箱内?)");
+        return 2;
+    }
+    let addr = p
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    let mut s = match TcpStream::connect(addr) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("proxy: 连接 {addr} 失败: {e}");
+            return 1;
+        }
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(25)));
+    if let Err(e) = write!(s, "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n") {
+        eprintln!("proxy: 发送 CONNECT 失败: {e}");
+        return 1;
+    }
+    let _ = s.flush();
+    let mut line = String::new();
+    if BufReader::new(&s).read_line(&mut line).is_err() {
+        eprintln!("proxy: 读取应答失败");
+        return 1;
+    }
+    let code: u16 = line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    println!("proxy_status={code} target={host}:{port}");
+    match code {
+        200 => 0,
+        403 => 3,
+        _ => 1,
     }
 }
 

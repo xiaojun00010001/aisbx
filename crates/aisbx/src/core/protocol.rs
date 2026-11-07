@@ -17,6 +17,9 @@ pub struct EscRequest {
     pub token: String,
     /// 由宿主 launcher 生成、不可被沙箱内程序伪造
     pub command_id: String,
+    /// 沙箱入口登记真实目标进程 PID(供内核违规日志按 PID 归属)
+    #[serde(default)]
+    pub pid: u32,
     pub requested_by: serde_json::Value,
 }
 

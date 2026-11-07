@@ -30,9 +30,12 @@ pub fn profile(policy: &Policy, ctx: &RunCtx) -> String {
     let broker_dir = canon(&ctx.broker_dir.to_string_lossy());
     let esc_canon = format!("{broker_dir}/esc.sock");
     let esc_raw = ctx.broker_dir.join("esc.sock").to_string_lossy().to_string();
+    let net_canon = format!("{broker_dir}/net.sock");
+    let net_raw = ctx.broker_dir.join("net.sock").to_string_lossy().to_string();
     out.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", esc(&broker_dir)));
-    out.push_str(&format!("(allow network* (local unix-socket (subpath \"{}\")))\n", esc(&esc_canon)));
-    out.push_str(&format!("(allow network* (local unix-socket (subpath \"{}\")))\n", esc(&esc_raw)));
+    for sock in [esc_canon, esc_raw, net_canon, net_raw] {
+        out.push_str(&format!("(allow network* (local unix-socket (subpath \"{}\")))\n", esc(&sock)));
+    }
     // 写入:仅策略白名单 + 用户授权路径(B 契约:授权进入下一次执行的策略快照)
     out.push_str("(allow file-write* (literal \"/dev/null\"))\n");
     let mut writable: Vec<String> = policy
@@ -70,11 +73,19 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
         return Err("sandbox-exec 不可用:拒绝以无约束方式执行(fail-closed)".into());
     }
     let p = profile(policy, ctx);
-    let mut v = vec![
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("取当前可执行文件路径失败: {e}"))?
+        .to_string_lossy()
+        .to_string();
+    // 统一 Unix 入口:先起沙箱内 HTTP CONNECT relay,再 spawn 目标命令。
+    // 这样遵守代理环境变量的程序无需任何改造即可被感知到精确目标。
+    let v = vec![
         "/usr/bin/sandbox-exec".to_string(),
         "-p".to_string(),
         p,
+        exe,
+        "__unix_entry".to_string(),
+        serde_json::to_string(cmd).map_err(|e| format!("序列化命令失败: {e}"))?,
     ];
-    v.extend(cmd.iter().cloned());
     Ok(v)
 }
