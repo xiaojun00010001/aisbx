@@ -42,6 +42,8 @@ pub fn spawn_server(listener: UnixListener, state: Arc<Mutex<State>>, stop: Arc<
 }
 
 fn handle(stream: UnixStream, state: &Arc<Mutex<State>>) -> Result<(), String> {
+    // UnixListener 是非阻塞的;数据通道的 io::copy 需要阻塞语义。
+    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
     // 逐字节读:BufReader 会预读并吞掉 relay 在同一条 UDS 上随后写入的隧道数据。
     let mut req_line = String::new();
     super::relay::read_line_unbuffered(&stream, &mut req_line)

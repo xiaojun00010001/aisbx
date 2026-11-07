@@ -73,6 +73,9 @@ pub fn start(net_state: Arc<Mutex<NetState>>, audit: Arc<Audit>) -> Result<NetPr
 }
 
 fn handle_client(mut stream: TcpStream, state: &Arc<Mutex<NetState>>, audit: &Arc<Audit>) -> Result<(), String> {
+    // Windows 上 accept 返回的 socket 会继承 listener 的非阻塞标志;不设回阻塞时,
+    // SOCKS5 等第二个报文的 read_exact 会立刻 WouldBlock 并关闭连接。
+    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     // 首字节 0x05 = SOCKS5;其余按 HTTP CONNECT。peek 不消耗数据。
     let mut probe = [0u8; 1];

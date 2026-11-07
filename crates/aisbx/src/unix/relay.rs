@@ -122,6 +122,8 @@ fn serve(listener: TcpListener, net_sock: PathBuf, command_id: String) {
 }
 
 fn handle_client(mut stream: TcpStream, net_sock: PathBuf, command_id: String) -> Result<(), String> {
+    // 隧道需要阻塞读:Windows 的 accept 会继承 listener 的非阻塞标志,这里统一设回。
+    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .ok();
