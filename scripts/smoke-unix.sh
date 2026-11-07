@@ -250,6 +250,94 @@ else
 fi
 cat "$ROOT/t8.out" >> "$LOG"
 
+echo "[$(date +%H:%M:%S)] == T9 契约边界与安全断言 ==" | tee -a "$LOG"
+P9="$ROOT/p9.json"; A9="$ROOT/p9.audit.jsonl"; TASK9="smoke9-$$"
+python3 - "$P9" "$WS" "$A9" "$TASK9" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit},
+}, open(policy, "w"), indent=2)
+PY
+
+# T9a --require-full 必须按能力报告判定,不能硬编码平台结论
+CAP_ALL=$("$BIN" capabilities 2>>"$LOG")
+FULL_EXPECT=$(printf '%s' "$CAP_ALL" | python3 -c '
+import json,sys
+w={"auto_violation_capture","cpu","memory_total","landlock","bubblewrap","seatbelt","seccomp","launcher_retry"}
+c=json.load(sys.stdin)["capabilities"]
+print("deny" if any(v=="unavailable" and k not in w for k,v in c.items()) else "allow")
+' 2>/dev/null)
+"$BIN" run --require-full -p "$P9" -- "$BURN" write "$WS/full.txt" >>"$LOG" 2>&1
+FULL_RC=$?
+if { [[ "$FULL_EXPECT" == "deny" && $FULL_RC -ne 0 ]] || [[ "$FULL_EXPECT" == "allow" && $FULL_RC -eq 0 ]]; }; then
+  pass "T9a --require-full 按能力报告判定($FULL_EXPECT)"
+else
+  bad "T9a --require-full 按能力报告判定(期望 $FULL_EXPECT, rc=$FULL_RC)"
+fi
+
+# T9b 没发生过真实越界时,宿主不能凭空签发网络授权(fail-closed)
+"$BIN" run -p "$P9" -- "$BURN" spin 4 >"$ROOT/t9b.run" 2>&1 &
+T9B_PID=$!
+sleep 1
+"$BIN" authorize -p "$P9" --host never-observed.invalid --port 443 >"$ROOT/t9b.auth" 2>&1
+T9B_RC=$?
+wait "$T9B_PID"
+if [[ $T9B_RC -ne 0 ]]; then
+  pass "T9b 无真实越界时拒绝签发网络授权(fail-closed)"
+else
+  bad "T9b 无真实越界时拒绝签发网络授权(fail-closed)"
+fi
+cat "$ROOT/t9b.auth" >> "$LOG"
+
+# T9c 两个并发任务的审计不得串台
+P9A="$ROOT/p9a.json"; A9A="$ROOT/p9a.audit.jsonl"
+P9B="$ROOT/p9b.json"; A9B="$ROOT/p9b.audit.jsonl"
+python3 - "$P9A" "$WS" "$A9A" "smoke9a-$$" "$P9B" "$A9B" "smoke9b-$$" <<'PY'
+import json, sys
+for p, a, t in [(sys.argv[1], sys.argv[3], sys.argv[4]), (sys.argv[5], sys.argv[6], sys.argv[7])]:
+    ws = sys.argv[2]
+    json.dump({
+        "task": t,
+        "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                       "allow_escalation": [], "escalation": "deny"},
+        "network": {"loopback": True, "internet": False},
+        "resources": {}, "broker": {"audit_log": a},
+    }, open(p, "w"), indent=2)
+PY
+"$BIN" run -p "$P9A" --json -- "$BURN" write "$WS/a9.txt" >"$ROOT/a9.out" 2>&1 &
+PA=$!
+"$BIN" run -p "$P9B" --json -- "$BURN" write "$WS/b9.txt" >"$ROOT/b9.out" 2>&1 &
+PB=$!
+wait "$PA"; wait "$PB"
+if grep -q 'a9.txt' "$A9A" && ! grep -q 'b9.txt' "$A9A" && grep -q 'b9.txt' "$A9B" && ! grep -q 'a9.txt' "$A9B"; then
+  pass "T9c 并发任务审计不串台"
+else
+  bad "T9c 并发任务审计不串台"
+fi
+
+# T9d 代理拒绝 loopback/私网目标(防 SSRF),且不进入等待授权
+"$BIN" run -p "$P9" -- "$BURN" proxy 127.0.0.1 443 >"$ROOT/t9d.out" 2>&1
+T9D_RC=$?
+if [[ $T9D_RC -eq 3 ]]; then
+  pass "T9d 代理拒绝 loopback 目标(SSRF fail-closed)"
+else
+  bad "T9d 代理拒绝 loopback 目标(SSRF fail-closed) (rc=$T9D_RC)"
+fi
+cat "$ROOT/t9d.out" >> "$LOG"
+
+# T9e 能力报告关键字段完整(避免静默降级)
+if printf '%s' "$CAP_ALL" | grep -q '"net_proxy"' && printf '%s' "$CAP_ALL" | grep -q '"auto_violation_capture"'; then
+  pass "T9e 能力报告含采集能力与代理协议字段"
+else
+  bad "T9e 能力报告含采集能力与代理协议字段"
+fi
+
 echo "" | tee -a "$LOG"
 echo "SMOKE_DONE fail=$fail" | tee -a "$LOG"
 if [[ $fail -eq 0 ]]; then

@@ -229,6 +229,76 @@ try {
     Write-Host ($r8.Trim())
     Assert "T8c SOCKS5 授权后运行中放行(socks_status=0)" ($r8 -match "socks_status=0")
     Assert "T8d net.grant 已落审计" ((Test-Path $a8) -and (Select-String -Path $a8 -Pattern '"event":"net.grant"' -Quiet))
+
+    # ── T9 契约边界与安全断言 ────────────────────────────────────────
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T9 契约边界与安全断言 =="
+    $p9 = Join-Path $root "p9.json"; $a9 = Join-Path $root "p9.audit.jsonl"
+    @{
+      task       = "smoke9-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
+      broker     = @{ audit_log = $a9 }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p9 -Encoding UTF8
+
+    # T9a --require-full 必须按能力报告判定,不能硬编码平台结论
+    $capRaw = (& $bin capabilities 2>&1) | Out-String
+    $capAll = $capRaw | ConvertFrom-Json
+    $white = @('auto_violation_capture','cpu','memory_total','landlock','bubblewrap',
+               'seatbelt','seccomp','launcher_retry')
+    $fatal = @($capAll.capabilities.PSObject.Properties | Where-Object {
+                 $_.Value -eq 'unavailable' -and $white -notcontains $_.Name })
+    $expect = if ($fatal.Count -gt 0) { 'deny' } else { 'allow' }
+    & $bin run --require-full -p $p9 -- "$ws\burn.exe" write "$ws\full.txt" 2>&1 | Out-Null
+    $fullRc = $LASTEXITCODE
+    $okFull = (($expect -eq 'deny' -and $fullRc -ne 0) -or ($expect -eq 'allow' -and $fullRc -eq 0))
+    Assert "T9a --require-full 按能力报告判定($expect)" $okFull
+
+    # T9b 没发生过真实越界时,宿主不能凭空签发网络授权(fail-closed)
+    $procB = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -RedirectStandardOutput "$ws\t9b.run" -RedirectStandardError "$ws\t9b.err" `
+      -ArgumentList @('run','-p',$p9,'--',"$ws\burn.exe",'spin','4')
+    Start-Sleep -Seconds 1
+    $authB = (& $bin authorize -p $p9 --host never-observed.invalid --port 443 2>&1) | Out-String
+    $authRc = $LASTEXITCODE
+    if (-not $procB.WaitForExit(20000)) { $procB.Kill() }
+    Write-Host ($authB.Trim())
+    Assert "T9b 无真实越界时拒绝签发网络授权(fail-closed)" ($authRc -ne 0)
+
+    # T9c 两个并发任务的审计不得串台
+    $p9a = Join-Path $root "p9a.json"; $a9a = Join-Path $root "p9a.audit.jsonl"
+    $p9b = Join-Path $root "p9b.json"; $a9b = Join-Path $root "p9b.audit.jsonl"
+    foreach ($pair in @(@($p9a,$a9a,"smoke9a-$PID"), @($p9b,$a9b,"smoke9b-$PID"))) {
+      @{
+        task       = $pair[2]
+        filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                        allow_escalation = @(); escalation = "deny" }
+        network    = @{ loopback = $true; internet = $false }
+        resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
+        broker     = @{ audit_log = $pair[1] }
+      } | ConvertTo-Json -Depth 5 | Set-Content $pair[0] -Encoding UTF8
+    }
+    $procA = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -RedirectStandardOutput "$ws\a9.out" -RedirectStandardError "$ws\a9.err" `
+      -ArgumentList @('run','-p',$p9a,'--',"$ws\burn.exe",'write',"$ws\a9.txt")
+    $procC = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -RedirectStandardOutput "$ws\b9.out" -RedirectStandardError "$ws\b9.err" `
+      -ArgumentList @('run','-p',$p9b,'--',"$ws\burn.exe",'write',"$ws\b9.txt")
+    $null = $procA.WaitForExit(30000); $null = $procC.WaitForExit(30000)
+    $okC = (Select-String -Path $a9a -Pattern 'a9.txt' -Quiet) `
+      -and (-not (Select-String -Path $a9a -Pattern 'b9.txt' -Quiet)) `
+      -and (Select-String -Path $a9b -Pattern 'b9.txt' -Quiet) `
+      -and (-not (Select-String -Path $a9b -Pattern 'a9.txt' -Quiet))
+    Assert "T9c 并发任务审计不串台" $okC
+
+    # T9d 代理拒绝 loopback 目标(防 SSRF)
+    & $bin run -p $p9 -- "$ws\burn.exe" proxy 127.0.0.1 443 2>&1 | Out-Null
+    Assert "T9d 代理拒绝 loopback 目标(SSRF fail-closed)" ($LASTEXITCODE -eq 3)
+
+    # T9e 能力报告关键字段完整(避免静默降级)
+    Assert "T9e 能力报告含采集能力与代理协议字段" `
+      ($capRaw -match '"net_proxy"' -and $capRaw -match '"auto_violation_capture"')
   }
 }
 finally {
