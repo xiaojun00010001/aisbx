@@ -191,6 +191,44 @@ try {
     Write-Host ($r6.Trim())
     Assert "T6c 授权后运行中放行(proxy_status=200)" ($r6 -match "proxy_status=200")
     Assert "T6d net.grant 已落审计" ((Test-Path $a6) -and (Select-String -Path $a6 -Pattern '"event":"net.grant"' -Quiet))
+
+    # ── T8 SOCKS5:同一端口按首字节分流 ───────────────────────────────
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T8 SOCKS5 =="
+    $p8 = Join-Path $root "p8.json"
+    $a8 = Join-Path $root "p8.audit.jsonl"
+    @{
+      task       = "smoke8-$PID"
+      filesystem = @{
+        write           = @($ws)
+        read            = @()
+        deny_escalation = @()
+        allow_escalation= @()
+        escalation      = "deny"
+      }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
+      broker     = @{ audit_log = $a8 }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p8 -Encoding UTF8
+
+    $t8out = Join-Path $ws "t8.out"; $t8err = Join-Path $ws "t8.err"
+    $proc8 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -RedirectStandardOutput $t8out -RedirectStandardError $t8err `
+      -ArgumentList @('run', '-p', $p8, '--', "$ws\burn.exe", 'socks', 'example.com', '443')
+    for ($i = 0; $i -lt 100; $i++) {
+      if ((Test-Path $a8) -and (Select-String -Path $a8 -Pattern '"event":"violation"' -Quiet)) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    $has8 = (Test-Path $a8) `
+      -and (Select-String -Path $a8 -Pattern '"host":"example.com"' -Quiet) `
+      -and (Select-String -Path $a8 -Pattern '"port":443' -Quiet)
+    Assert "T8a SOCKS5 自动拿到精确 host:port(零解析/零改造)" $has8
+    $auth8 = (& $bin authorize -p $p8 --host example.com --port 443) | Out-String
+    Assert "T8b authorize --host 放行" ($LASTEXITCODE -eq 0 -and $auth8 -match '"granted":\s*true')
+    if (-not $proc8.WaitForExit(60000)) { $proc8.Kill(); Write-Host "T8 run 60s 未退出,已强杀" }
+    $r8 = @(Get-Content $t8out, $t8err -ErrorAction SilentlyContinue) -join "`n"
+    Write-Host ($r8.Trim())
+    Assert "T8c SOCKS5 授权后运行中放行(socks_status=0)" ($r8 -match "socks_status=0")
+    Assert "T8d net.grant 已落审计" ((Test-Path $a8) -and (Select-String -Path $a8 -Pattern '"event":"net.grant"' -Quiet))
   }
 }
 finally {

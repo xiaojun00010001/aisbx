@@ -7,7 +7,7 @@
 //! 未授权目标 -> 结构化 violation + 等待用户授权(运行中即可放行,不用重跑命令);
 //! 已授权目标 -> 宿主代连并双向转发。授权清单只在本次任务内存里,不写回策略文件。
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,13 +42,10 @@ pub fn spawn_server(listener: UnixListener, state: Arc<Mutex<State>>, stop: Arc<
 }
 
 fn handle(stream: UnixStream, state: &Arc<Mutex<State>>) -> Result<(), String> {
+    // 逐字节读:BufReader 会预读并吞掉 relay 在同一条 UDS 上随后写入的隧道数据。
     let mut req_line = String::new();
-    {
-        let mut reader = BufReader::new(&stream);
-        reader
-            .read_line(&mut req_line)
-            .map_err(|e| format!("读取代理请求失败: {e}"))?;
-    }
+    super::relay::read_line_unbuffered(&stream, &mut req_line)
+        .map_err(|e| format!("读取代理请求失败: {e}"))?;
     let req: Value = serde_json::from_str(req_line.trim()).unwrap_or_default();
     let host = req.get("host").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let port = req.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;

@@ -33,7 +33,7 @@ pub fn report() -> Value {
                 "process_tree_kill": "full",
                 "auto_violation_capture": "unavailable",
                 "net_violation_capture": "partial",
-                "net_proxy": "http-connect"
+                "net_proxy": "http-connect+socks5"
             }
         })
     }
@@ -61,7 +61,7 @@ pub fn report() -> Value {
                 "auto_violation_capture": if sb { "partial" } else { "unavailable" },
                 "violation_log_probe": "sandbox-reporting-violation",
                 "net_violation_capture": "partial",
-                "net_proxy": "http-connect",
+                "net_proxy": "http-connect+socks5",
                 "seatbelt": if sb { "full" } else { "unavailable" }
             }
         })
@@ -89,7 +89,7 @@ pub fn report() -> Value {
                 "process_tree_kill": "partial",
                 "auto_violation_capture": "unavailable",
                 "net_violation_capture": if bwrap { "partial" } else { "unavailable" },
-                "net_proxy": "http-connect",
+                "net_proxy": "http-connect+socks5",
                 "bubblewrap": if bwrap { "full" } else { "unavailable" },
                 "landlock": if landlock { "partial" } else { "unavailable" },
                 "seccomp": if bwrap { "partial" } else { "unavailable" }

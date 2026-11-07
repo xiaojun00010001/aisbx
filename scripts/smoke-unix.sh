@@ -217,6 +217,39 @@ else
   warn "T7b 内核违规日志自动采集:该平台不可用,不计失败(见 docs/06)"
 fi
 
+echo "[$(date +%H:%M:%S)] == T8 SOCKS5:同一端口按首字节分流 ==" | tee -a "$LOG"
+P8="$ROOT/p8.json"; A8="$ROOT/p8.audit.jsonl"; TASK8="smoke8-$$"
+python3 - "$P8" "$WS" "$A8" "$TASK8" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit},
+}, open(policy, "w"), indent=2)
+PY
+"$BIN" run -p "$P8" --json -- "$BURN" socks example.com 443 >"$ROOT/t8.out" 2>&1 &
+T8_PID=$!
+for _ in $(seq 1 100); do
+  grep -q '"event":"violation".*"kind":"net"' "$A8" 2>/dev/null && break
+  sleep 0.2
+done
+assert "T8a SOCKS5 自动拿到精确 host:port(零解析/零改造)" grep -q '"host":"example.com".*"port":443' "$A8"
+"$BIN" authorize -p "$P8" --host example.com --port 443 >>"$LOG" 2>&1
+wait "$T8_PID"
+T8_RC=$?
+if [[ $T8_RC -eq 0 ]]; then pass "T8b SOCKS5 授权后运行中放行"; else bad "T8b SOCKS5 授权后运行中放行 (rc=$T8_RC)"; fi
+assert "T8c net.grant 已落审计" grep -q '"event":"net.grant"' "$A8"
+if [[ $(grep -c '"event":"spawned"' "$A8") -eq 1 ]]; then
+  pass "T8d 全程只执行一次"
+else
+  bad "T8d 全程只执行一次"
+fi
+cat "$ROOT/t8.out" >> "$LOG"
+
 echo "" | tee -a "$LOG"
 echo "SMOKE_DONE fail=$fail" | tee -a "$LOG"
 if [[ $fail -eq 0 ]]; then

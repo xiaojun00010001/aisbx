@@ -14,13 +14,17 @@ fn main() {
             args.get(1).map(|s| s.as_str()).unwrap_or(""),
             args.get(2).and_then(|v| v.parse().ok()).unwrap_or(443),
         ),
+        Some("socks") => socks(
+            args.get(1).map(|s| s.as_str()).unwrap_or(""),
+            args.get(2).and_then(|v| v.parse().ok()).unwrap_or(443),
+        ),
         Some("loopback") => loopback(),
         Some("conn") => conn(
             args.get(1).map(|s| s.as_str()).unwrap_or("127.0.0.1"),
             args.get(2).and_then(|v| v.parse().ok()).unwrap_or(80),
         ),
         _ => {
-            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | conn <host> <port> | proxy <host> <port> | flow <policy> <tokenFile> <target> <grant|deny>");
+            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | conn <host> <port> | proxy|socks <host> <port> | flow <policy> <tokenFile> <target> <grant|deny>");
             2
         }
     };
@@ -203,6 +207,61 @@ fn proxy(host: &str, port: u16) -> i32 {
     match code {
         200 => 0,
         403 => 3,
+        _ => 1,
+    }
+}
+
+/// P0 验证载荷:模拟遵守 ALL_PROXY 的程序,发一次 SOCKS5 CONNECT。
+/// 目标 host:port 由代理从 SOCKS5 握手报文中自己读到,程序零配合。
+/// 退出码:REP=0 -> 0(已放行),REP=2 -> 3(拒绝),其它 -> 1,无代理 -> 2。
+fn socks(host: &str, port: u16) -> i32 {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let p = std::env::var("ALL_PROXY")
+        .or_else(|_| std::env::var("all_proxy"))
+        .unwrap_or_default();
+    if p.is_empty() || host.is_empty() {
+        eprintln!("socks: 缺少 ALL_PROXY 或 host(不在沙箱内?)");
+        return 2;
+    }
+    let addr = p
+        .trim_start_matches("socks5h://")
+        .trim_start_matches("socks5://")
+        .trim_end_matches('/');
+    let mut s = match TcpStream::connect(addr) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("socks: 连接 {addr} 失败: {e}");
+            return 1;
+        }
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(25)));
+    if s.write_all(&[5, 1, 0]).is_err() {
+        return 1;
+    }
+    let mut greeting = [0u8; 2];
+    if s.read_exact(&mut greeting).is_err() || greeting[1] != 0 {
+        eprintln!("socks: 代理方法协商失败");
+        return 1;
+    }
+    let hb = host.as_bytes();
+    let mut req = vec![5, 1, 0, 3, hb.len() as u8];
+    req.extend_from_slice(hb);
+    req.extend_from_slice(&port.to_be_bytes());
+    if s.write_all(&req).is_err() {
+        return 1;
+    }
+    let mut reply = [0u8; 10];
+    if s.read_exact(&mut reply).is_err() {
+        eprintln!("socks: 读取应答失败");
+        return 1;
+    }
+    println!("socks_status={} target={host}:{port}", reply[1]);
+    match reply[1] {
+        0 => 0,
+        2 => 3,
         _ => 1,
     }
 }

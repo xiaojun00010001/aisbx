@@ -154,10 +154,14 @@ fn install_proxy_env(port: u16) -> Vec<(&'static str, Option<String>)> {
         .iter()
         .map(|k| (*k, std::env::var(k).ok()))
         .collect();
-    let proxy = format!("http://127.0.0.1:{port}");
-    for k in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
-        std::env::set_var(k, &proxy);
+    let http_proxy = format!("http://127.0.0.1:{port}");
+    for k in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
+        std::env::set_var(k, &http_proxy);
     }
+    // 同一代理端口按首字节分流:0x05 = SOCKS5,否则 HTTP CONNECT。
+    let socks_proxy = format!("socks5h://127.0.0.1:{port}");
+    std::env::set_var("ALL_PROXY", &socks_proxy);
+    std::env::set_var("all_proxy", &socks_proxy);
     std::env::set_var("NO_PROXY", "localhost,127.0.0.1,::1");
     std::env::set_var("no_proxy", "localhost,127.0.0.1,::1");
     saved
