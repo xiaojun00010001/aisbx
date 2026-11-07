@@ -83,6 +83,8 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
 
     let envs: Vec<(&str, String)> = vec![
         ("AISBX_ATTEMPT", ctx.attempt.to_string()),
+        // --clearenv 会清掉 launcher 继承的环境,relay 端口必须显式带进沙箱。
+        ("AISBX_RELAY_PORT", ctx.relay_port.to_string()),
         ("AISBX_BROKER_DIR", broker_dir),
         ("AISBX_COMMAND_ID", ctx.command_id.clone()),
         ("AISBX_GRANTED_PATHS", ctx.granted.join(":")),

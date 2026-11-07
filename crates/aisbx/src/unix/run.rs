@@ -23,6 +23,9 @@ pub struct RunCtx {
     pub broker_dir: PathBuf,
     pub command_id: String,
     pub policy_file: String,
+    /// 沙箱内 relay 监听端口。Linux 的 bwrap --clearenv 要求显式 --setenv,
+    /// 因此必须由 make_argv 拿到同一个值,不能只靠 spawn 的进程环境继承。
+    pub relay_port: u16,
 }
 
 /// `make_argv` 由 Linux/macOS 平台后端提供:按当前策略快照生成沙箱包装命令。
@@ -67,6 +70,12 @@ where
         }
         let snap = broker.snapshot();
         prev_granted = snap.granted.len();
+        // 每次 attempt 换一个端口,避免上一次 relay 残留占用(TIME_WAIT / 进程组回收延迟)。
+        let relay_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .ok()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port())
+            .unwrap_or(0);
         let ctx = RunCtx {
             attempt,
             granted: snap.granted.clone(),
@@ -74,6 +83,7 @@ where
             broker_dir: broker.dir.clone(),
             command_id: command_id.clone(),
             policy_file: policy_file.to_string(),
+            relay_port,
         };
 
         let argv = make_argv(policy, cmd, &ctx)?;
@@ -179,14 +189,9 @@ fn spawn(argv: &[String], ctx: &RunCtx, policy: &aisbx_policy::Policy) -> Result
     }
     c.env("TMPDIR", std::env::temp_dir());
 
-    // P0:宿主先占一个回环端口拿到号再释放,沙箱内 relay 进程 bind 同一端口。
-    // 沙箱 netns 的回环是独立的,宿主持有的 listener 不会与之冲突。
-    let relay_port = std::net::TcpListener::bind("127.0.0.1:0")
-        .ok()
-        .and_then(|l| l.local_addr().ok())
-        .map(|a| a.port())
-        .unwrap_or(0);
-    c.env("AISBX_RELAY_PORT", relay_port.to_string());
+    // P0:沙箱内 relay 端口。macOS 靠环境继承即可;Linux 还需 bwrap --setenv
+    // (见 bwrap.rs),两边用的是同一个 ctx.relay_port。
+    c.env("AISBX_RELAY_PORT", ctx.relay_port.to_string());
 
     // RLIMIT_NPROC 按【用户】计数,不是每任务配额:设成策略值会连 fork 都失败(EAGAIN),
     // 故不使用;macOS 也没有 cgroups 等价物,进程数上限在能力报告中标 unavailable。
