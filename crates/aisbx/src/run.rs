@@ -130,10 +130,16 @@ pub fn run_windows(policy: &Policy, policy_file: &str, cmd: &[String], json: boo
     trace("stage10 cleanup");
     restore_proxy_env(saved_env);
     drop(netproxy);
-    let _ = &broker; // 句柄内的 stop 在 run_windows 返回时统一释放
+    // C20:撤销运行中提权新落的 ACE(此前只撤启动白名单,会留下持久 ACL 残余)。
+    if let Ok(list) = broker.granted_acl.lock() {
+        for p in list.iter() {
+            acl::revoke(&package_sid, p);
+        }
+    }
     for p in &granted_paths {
         acl::revoke(&package_sid, p);
     }
+    let _ = &broker; // 句柄内的 stop 在 run_windows 返回时统一释放
     if policy.network.loopback {
         loopback::revoke_loopback(&package_sid);
     }

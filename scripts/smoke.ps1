@@ -316,6 +316,65 @@ try {
       $script:rows += "| T9 段异常(未跑完) | **FAIL** |"
       $script:fail++
     }
+
+    # ── T10 能力契约组(C07/C19/C20/C22) ─────────────────────────────
+    try {
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T10 能力契约组 =="
+    $p10 = Join-Path $root "p10.json"; $a10 = Join-Path $root "p10.audit.jsonl"
+    @{
+      task       = "smoke10-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @($out); escalation = "auto" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{ memory_mb_per_process = 64; memory_mb_total = 256; active_processes = 10 }
+      broker     = @{ audit_log = $a10 }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p10 -Encoding UTF8
+
+    # T10a C07:auto 模式命中 allow_escalation 前缀(deny 模式已由 T2a 覆盖)
+    & $bin run -p $p10 -- "$ws\aisbx.exe" escalate -p $p10 --path "$out\t10a.txt" --access write 2>&1 |
+      Out-File "$ws\t10a.out" -Encoding utf8
+    Assert "T10a C07 auto 模式按 allow_escalation 授权" `
+      (Select-String -Path "$ws\t10a.out" -Pattern '"granted":true' -Quiet -ErrorAction SilentlyContinue)
+
+    # T10b C22:--json 事件流含 spawned / exit
+    & $bin run -p $p10 --json -- "$ws\burn.exe" write "$ws\t10b.txt" 2>&1 |
+      Out-File "$ws\t10b.out" -Encoding utf8
+    Assert "T10b C22 --json 事件流含 spawned/exit" `
+      ((Select-String -Path "$ws\t10b.out" -Pattern '"event":"spawned"' -Quiet -ErrorAction SilentlyContinue) `
+       -and (Select-String -Path "$ws\t10b.out" -Pattern '"event":"exit"' -Quiet -ErrorAction SilentlyContinue))
+
+    # T10c C19:宿主被杀时 Job 应带走整棵进程树(KILL_ON_JOB_CLOSE)
+    $capRaw10 = (& $bin capabilities 2>&1) | Out-String
+    $cap10 = $capRaw10 | ConvertFrom-Json
+    $ptk = $cap10.capabilities.process_tree_kill
+    if ($ptk -eq 'full') {
+      $procKill = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+        -RedirectStandardOutput "$ws\t10c.out" -RedirectStandardError "$ws\t10c.err" `
+        -ArgumentList @('run','-p',$p10,'--',"$ws\burn.exe",'spin','20')
+      Start-Sleep -Seconds 2
+      try { $procKill.Kill() } catch { }
+      Start-Sleep -Seconds 2
+      $left = @(Get-CimInstance Win32_Process -Filter "Name='burn.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -like "*$ws*" })
+      Assert "T10c C19 宿主被杀后无残留沙箱进程" ($left.Count -eq 0)
+    } else {
+      Warn "T10c C19 该平台标 $ptk,未验证"
+    }
+
+    # T10d C20:任务结束后提权新落的 ACE 必须被撤销(修复前会残留 package SID)
+    $aclText = (& icacls "$out" 2>&1) | Out-String
+    Assert "T10d C20 任务结束无提权 ACL 残余" ($aclText -notmatch 'S-1-15-2-')
+
+    # T10e 能力报告每个能力都有明确状态值
+    $skip = @('net_proxy','violation_log_probe')
+    $bad = @($cap10.capabilities.PSObject.Properties | Where-Object {
+               $skip -notcontains $_.Name -and $_.Value -notin @('full','partial','unavailable') })
+    Assert "T10e 能力报告逐项状态明确" ($bad.Count -eq 0)
+    } catch {
+      Warn "T10 段异常: $_"
+      $script:rows += "| T10 段异常(未跑完) | **FAIL** |"
+      $script:fail++
+    }
   }
 }
 finally {

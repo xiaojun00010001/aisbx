@@ -338,6 +338,68 @@ else
   bad "T9e 能力报告含采集能力与代理协议字段"
 fi
 
+echo "[$(date +%H:%M:%S)] == T10 能力契约组(C07/C19/C20/C22) ==" | tee -a "$LOG"
+P10="$ROOT/p10.json"; A10="$ROOT/p10.audit.jsonl"; TASK10="smoke10-$$"
+python3 - "$P10" "$WS" "$OUT" "$A10" "$TASK10" <<'PY'
+import json, sys
+policy, ws, out, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [out], "escalation": "auto"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {}, "broker": {"audit_log": audit},
+}, open(policy, "w"), indent=2)
+PY
+
+# T10a C07:auto 模式命中 allow_escalation 前缀时授权(deny 模式已由 T2a 覆盖)
+"$BIN" run -p "$P10" -- "$BIN" escalate -p "$P10" --path "$OUT/t10a.txt" --access write >"$ROOT/t10a.out" 2>&1
+assert "T10a C07 auto 模式按 allow_escalation 授权" grep -q '"granted":true' "$ROOT/t10a.out"
+cat "$ROOT/t10a.out" >> "$LOG"
+
+# T10b C22:--json 事件流含 spawned / exit
+"$BIN" run -p "$P10" --json -- "$BURN" write "$WS/t10b.txt" >"$ROOT/t10b.out" 2>&1
+if grep -q '"event":"spawned"' "$ROOT/t10b.out" && grep -q '"event":"exit"' "$ROOT/t10b.out"; then
+  pass "T10b C22 --json 事件流含 spawned/exit"
+else
+  bad "T10b C22 --json 事件流含 spawned/exit"
+fi
+
+# T10c C19:宿主被杀时进程树终止,按能力报告判定(Unix 标 partial,如实跳过)
+CAP10=$("$BIN" capabilities 2>>"$LOG")
+PTK=$(printf '%s' "$CAP10" | python3 -c 'import json,sys; print(json.load(sys.stdin)["capabilities"]["process_tree_kill"])' 2>/dev/null)
+if [[ "$PTK" == "full" ]]; then
+  "$BIN" run -p "$P10" -- "$BURN" spin 20 >"$ROOT/t10c.out" 2>&1 &
+  T10C_PID=$!
+  sleep 2
+  kill -9 "$T10C_PID" 2>/dev/null
+  sleep 1
+  if pgrep -f "$BURN spin 20" >/dev/null 2>&1; then
+    bad "T10c C19 宿主被杀后无残留沙箱进程"
+  else
+    pass "T10c C19 宿主被杀后无残留沙箱进程"
+  fi
+else
+  warn "T10c C19 宿主被杀进程树终止:该平台标 $PTK,未验证(已知缺口)"
+fi
+
+# T10d C20:任务结束无 ACL 残余。Unix 无 ACL 机制,如实跳过;Windows 由 smoke.ps1 实断言。
+warn "T10d C20 ACL 清理:该后端不使用 ACL,由 Windows 冒烟实断言"
+
+# T10e 能力报告每个能力都有明确状态值(不静默降级/不虚报)
+CAP10_OK=$(printf '%s' "$CAP10" | python3 -c '
+import json,sys
+c=json.load(sys.stdin)["capabilities"]
+skip={"net_proxy","violation_log_probe"}
+bad=[k for k,v in c.items() if k not in skip and v not in ("full","partial","unavailable")]
+print("ok" if not bad else "bad:"+",".join(bad))
+' 2>/dev/null)
+if [[ "$CAP10_OK" == "ok" ]]; then
+  pass "T10e 能力报告逐项状态明确"
+else
+  bad "T10e 能力报告逐项状态明确 ($CAP10_OK)"
+fi
+
 echo "" | tee -a "$LOG"
 echo "SMOKE_DONE fail=$fail" | tee -a "$LOG"
 if [[ $fail -eq 0 ]]; then

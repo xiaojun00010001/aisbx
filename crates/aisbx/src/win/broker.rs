@@ -45,6 +45,8 @@ pub struct BrokerHandle {
     pub stop: Arc<AtomicBool>,
     pub net_state: Arc<Mutex<NetState>>,
     pub audit: Arc<Audit>,
+    /// C20:运行中提权新落的 ACL 目标,任务结束由 launcher 一并撤销。
+    pub granted_acl: Arc<Mutex<Vec<String>>>,
 }
 
 impl Drop for BrokerHandle {
@@ -62,12 +64,15 @@ pub fn start_server(policy: &Policy, package_sid: &str) -> BrokerHandle {
     }
     let stop = Arc::new(AtomicBool::new(false));
     let tokens: TokenStore = Arc::new(Mutex::new(HashMap::new()));
+    // C20:记录运行中提权实际落 ACL 的路径(可能是父目录),供 stage10 撤销。
+    let granted_acl: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sid = package_sid.to_string();
     let stop2 = stop.clone();
     let tokens2 = tokens.clone();
+    let acl2 = granted_acl.clone();
     let policy2 = policy.clone();
     std::thread::spawn(move || unsafe {
-        if let Err(e) = server_loop(&policy2, &sid, &stop2, &tokens2) {
+        if let Err(e) = server_loop(&policy2, &sid, &stop2, &tokens2, &acl2) {
             eprintln!("aisbx: broker 授权管道异常: {e}");
         }
     });
@@ -85,10 +90,16 @@ pub fn start_server(policy: &Policy, package_sid: &str) -> BrokerHandle {
             eprintln!("aisbx: broker 控制管道异常: {e}");
         }
     });
-    BrokerHandle { stop, net_state, audit }
+    BrokerHandle { stop, net_state, audit, granted_acl }
 }
 
-unsafe fn server_loop(policy: &Policy, package_sid: &str, stop: &AtomicBool, tokens: &TokenStore) -> Result<(), String> {
+unsafe fn server_loop(
+    policy: &Policy,
+    package_sid: &str,
+    stop: &AtomicBool,
+    tokens: &TokenStore,
+    granted_acl: &Arc<Mutex<Vec<String>>>,
+) -> Result<(), String> {
     let pipe_name = format!(r"\\.\pipe\{}", policy.pipe_name());
     let h = create_pipe(&pipe_name, package_sid)?;
     let audit = Audit::new(policy.broker.audit_log.as_deref());
@@ -101,7 +112,7 @@ unsafe fn server_loop(policy: &Policy, package_sid: &str, stop: &AtomicBool, tok
             // 已有客户端在等待(ERROR_PIPE_CONNECTED)时继续,其余错误重试
         }
         if let Some(line) = read_line(h) {
-            let reply = handle_request(policy, &line, &audit, package_sid, tokens);
+            let reply = handle_request(policy, &line, &audit, package_sid, tokens, granted_acl);
             write_all(h, (reply + "\n").as_bytes());
         }
         DisconnectNamedPipe(h);
@@ -317,10 +328,17 @@ struct EscRequest {
     requested_by: serde_json::Value,
 }
 
-fn handle_request(policy: &Policy, line: &str, audit: &Audit, package_sid: &str, tokens: &TokenStore) -> String {
+fn handle_request(
+    policy: &Policy,
+    line: &str,
+    audit: &Audit,
+    package_sid: &str,
+    tokens: &TokenStore,
+    granted_acl: &Arc<Mutex<Vec<String>>>,
+) -> String {
     let reply = match serde_json::from_str::<EscRequest>(line) {
         Ok(req) => match req.op.as_str() {
-            "file" => decide_file(policy, &req, audit, package_sid, tokens),
+            "file" => decide_file(policy, &req, audit, package_sid, tokens, granted_acl),
             "net" => decide_net(policy, &req, audit),
             other => json_reply(false, &format!("未知操作 {other}")),
         },
@@ -329,7 +347,14 @@ fn handle_request(policy: &Policy, line: &str, audit: &Audit, package_sid: &str,
     reply
 }
 
-fn decide_file(policy: &Policy, req: &EscRequest, audit: &Audit, package_sid: &str, tokens: &TokenStore) -> String {
+fn decide_file(
+    policy: &Policy,
+    req: &EscRequest,
+    audit: &Audit,
+    package_sid: &str,
+    tokens: &TokenStore,
+    granted_acl: &Arc<Mutex<Vec<String>>>,
+) -> String {
     let path = expand_path(&req.path);
     let write = req.access.eq_ignore_ascii_case("write");
 
@@ -344,7 +369,7 @@ fn decide_file(policy: &Policy, req: &EscRequest, audit: &Audit, package_sid: &s
 
     // 2) token 快速路径:agent 已在宿主侧取得用户同意并签发,跳过 prompt/auto
     if !req.token.is_empty() {
-        return redeem_token(&req.token, &path, &req.access, package_sid, tokens, audit);
+        return redeem_token(&req.token, &path, &req.access, package_sid, tokens, audit, granted_acl);
     }
 
     // 3) 按模式裁决
@@ -372,6 +397,7 @@ fn decide_file(policy: &Policy, req: &EscRequest, audit: &Audit, package_sid: &s
     // 3) 授权落 ACL(目标文件不存在时授权其父目录继承),后续真实 syscall 直接放行
     match acl::grant_path(package_sid, &path, write) {
         Ok(acl_target) => {
+            record_acl(granted_acl, &acl_target);
             audit.log(&serde_json::json!({
                 "event": "escalation.grant", "op": "file", "path": path,
                 "acl_target": acl_target,
@@ -480,7 +506,15 @@ fn handle_control(
 }
 
 /// token 消费:校验存在/未过期/路径匹配/访问级别满足,一次性,用后即删。
-fn redeem_token(token: &str, path: &str, access: &str, package_sid: &str, tokens: &TokenStore, audit: &Audit) -> String {
+fn redeem_token(
+    token: &str,
+    path: &str,
+    access: &str,
+    package_sid: &str,
+    tokens: &TokenStore,
+    audit: &Audit,
+    granted_acl: &Arc<Mutex<Vec<String>>>,
+) -> String {
     let now = Instant::now();
     let hit = {
         let mut store = match tokens.lock() {
@@ -508,6 +542,7 @@ fn redeem_token(token: &str, path: &str, access: &str, package_sid: &str, tokens
     let write = t.access.eq_ignore_ascii_case("write");
     match acl::grant_path(package_sid, path, write) {
         Ok(acl_target) => {
+            record_acl(granted_acl, &acl_target);
             audit.log(&serde_json::json!({
                 "event": "token.redeemed", "path": path, "acl_target": acl_target,
                 "access": access
@@ -515,6 +550,14 @@ fn redeem_token(token: &str, path: &str, access: &str, package_sid: &str, tokens
             json_reply(true, "已按授权 token 授予 ACL(具体路径)")
         }
         Err(e) => json_reply(false, &format!("授权落 ACL 失败: {e}")),
+    }
+}
+
+/// 登记运行中提权落下的 ACL 目标,供任务结束统一撤销(C20)。
+fn record_acl(list: &Arc<Mutex<Vec<String>>>, target: &str) {
+    let mut g = list.lock().unwrap_or_else(|p| p.into_inner());
+    if !g.iter().any(|p| p.eq_ignore_ascii_case(target)) {
+        g.push(target.to_string());
     }
 }
 
