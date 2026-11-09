@@ -35,7 +35,11 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 # ── 任务环境:policy escalation=deny,确保授权只走 token 闭环 ──────────
-$root = Join-Path $env:TEMP "aisbx-smoke-$PID"
+$rootTmp = Join-Path $env:TEMP "aisbx-smoke-$PID"
+New-Item -ItemType Directory -Force -Path $rootTmp | Out-Null
+# 取**长路径**:CI 的 $env:TEMP 是 8.3 短路径(RUNNER~1),而 canonicalize
+# 之后的路径是长路径——两者形态不一致时,路径类断言无法比对。
+$root = (Get-Item $rootTmp).FullName
 $ws   = Join-Path $root "ws"
 $out  = Join-Path $root "outside"
 New-Item -ItemType Directory -Force -Path $ws, $out | Out-Null
@@ -402,8 +406,14 @@ try {
     Assert "T11b 路径精度标注为 reported" ($t11audit -match '"precision":"reported"')
     Assert "T11c 归属确定(attributed=true)" ($t11audit -match '"attributed":true')
     # JSON 里反斜杠被转义成双反斜杠,匹配前先做同样的转义
-    $t11esc = $t11target -replace '\\', '\\\\'
-    Assert "T11d 采集到的路径正确" ($t11audit -match [regex]::Escape($t11esc))
+    # 采集到的路径可能是「程序自报的原样路径」,也可能是「规范化后的长路径」
+    # (Windows 的 canonicalize 会补长路径)——两种形态都算对。
+    $t11leaf = Split-Path $t11target -Leaf
+    $t11long = "$((Get-Item (Split-Path $t11target -Parent)).FullName)\$t11leaf"
+    $t11esc  = ($t11target -replace '\\', '\\\\')
+    $t11escL = ($t11long  -replace '\\', '\\\\')
+    Assert "T11d 采集到的路径正确" `
+      (($t11audit -match [regex]::Escape($t11esc)) -or ($t11audit -match [regex]::Escape($t11escL)))
     } catch {
       Warn "T11 段异常: $_"
       $script:rows += "| T11 段异常(未跑完) | **FAIL** |"
@@ -427,8 +437,10 @@ try {
     } | ConvertTo-Json -Depth 5 | Set-Content $p12 -Encoding UTF8
 
     $t12target = Join-Path $out "t12.txt"
+    # 不做 stdout/stderr 重定向:CI 上 `-RedirectStandardOutput` 指向
+    # `$ws\t12.out` 会报 "The filename, directory name, or volume label
+    # syntax is incorrect."。本段断言只用退出码、文件落盘与审计。
     $proc12 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
-      -RedirectStandardOutput "$ws	12.out" -RedirectStandardError "$ws	12.err" `
       -ArgumentList @('run','-p',$p12,'--',"$ws\burn.exe",'stderrdeny',$t12target)
     for ($i = 0; $i -lt 100; $i++) {
       if ((Test-Path $a12) -and (Select-String -Path $a12 -Pattern 'needs-approval' -Quiet)) { break }
@@ -468,8 +480,12 @@ try {
     $t13new = Join-Path $out "t13new.txt"
     $t13old = Join-Path $out "t13old.txt"
     Set-Content -Path $t13old -Value "orig" -Encoding UTF8
+    # 标记走 AISBX_REPORT 报告文件(沙箱内进程写白名单目录内的文件),
+    # 宿主直接读:不依赖 stdout 捕获,也不依赖重定向能否成功。
+    $rpt13 = Join-Path $ws "report13.txt"
+    Remove-Item $rpt13 -ErrorAction SilentlyContinue
+    $env:AISBX_REPORT = $rpt13
     $proc13 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
-      -RedirectStandardOutput "$ws\t13.out" -RedirectStandardError "$ws\t13.err" `
       -ArgumentList @('run','-p',$p13,'--',"$ws\burn.exe",'probe2',$t13new,$t13old)
     for ($i = 0; $i -lt 100; $i++) {
       if ((Test-Path $a13) -and (Select-String -Path $a13 -Pattern 'needs-approval' -Quiet)) { break }
@@ -477,7 +493,8 @@ try {
     }
     & $bin authorize -p $p13 --path $t13new --access write 2>&1 | Out-Null
     if (-not $proc13.WaitForExit(60000)) { $proc13.Kill() }
-    $r13 = @(Get-Content "$ws\t13.out","$ws\t13.err" -ErrorAction SilentlyContinue) -join "`n"
+    $r13 = if (Test-Path $rpt13) { Get-Content $rpt13 -Raw } else { "" }
+    Remove-Item Env:AISBX_REPORT -ErrorAction SilentlyContinue
     Assert "T13a 授权后新文件创建成功" ($r13 -match "NEW_CREATED")
     Assert "T13b 授权粒度不外溢(同目录既有文件仍不可写)" `
       (($r13 -match "EXISTING_DENIED") -and ($r13 -notmatch "EXISTING_WRITEABLE"))

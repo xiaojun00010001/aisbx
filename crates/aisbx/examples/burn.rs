@@ -156,7 +156,7 @@ fn flow(args: &[String]) -> i32 {
     }
 
     let first = escalate(&token);
-    println!("escalate={first}");
+    report(&format!("escalate={first}"));
 
     if expect.eq_ignore_ascii_case("deny") {
         return if first != 0 { 0 } else { 1 };
@@ -166,11 +166,11 @@ fn flow(args: &[String]) -> i32 {
     }
 
     let wrote = std::fs::write(&target, b"x").is_ok();
-    println!("write={}", if wrote { "ok" } else { "fail" });
+    report(&format!("write={}", if wrote { "ok" } else { "fail" }));
 
     // 一次性 token:重放必须被拒
     let replay = escalate(&token);
-    println!("replay={replay}");
+    report(&format!("replay={replay}"));
 
     if !wrote || replay == 0 {
         1
@@ -389,7 +389,7 @@ fn write(path: &str) -> i32 {
     }
     match std::fs::write(path, b"x") {
         Ok(_) => {
-            println!("wrote {path}");
+            report(&format!("wrote {path}"));
             0
         }
         Err(e) => {
@@ -431,7 +431,7 @@ fn probe2(newp: &str, oldp: &str) -> i32 {
     let mut flags = 0;
     match std::fs::write(newp, b"x") {
         Ok(_) => {
-            println!("NEW_CREATED {newp}");
+            report(&format!("NEW_CREATED {newp}"));
             flags |= 1;
         }
         Err(_) => {
@@ -440,10 +440,10 @@ fn probe2(newp: &str, oldp: &str) -> i32 {
     }
     match std::fs::write(oldp, b"x") {
         Ok(_) => {
-            println!("EXISTING_WRITEABLE {oldp}");
+            report(&format!("EXISTING_WRITEABLE {oldp}"));
             flags |= 2;
         }
-        Err(_) => println!("EXISTING_DENIED {oldp}"),
+        Err(_) => report(&format!("EXISTING_DENIED {oldp}")),
     }
     // 返回码只反映「目标文件能否创建」:被拒 → 非 0(launcher 才会等授权并重跑);
     // 「既有文件是否可写」通过输出标记表达,不影响退出码。
@@ -475,6 +475,27 @@ fn conn(host: &str, port: u16) -> i32 {
         }
     }
     1
+}
+
+/// 把一行标记同时写到 stdout 与 `AISBX_REPORT` 指向的文件(若设置)。
+///
+/// 宿主在 Windows CI 上用 `Start-Process` 起进程时,`-RedirectStandardOutput`
+/// 在 CI 的短路径(`RUNNER~1`)下会报 "The filename, directory name, or volume
+/// label syntax is incorrect.";而管道捕获又拿不到子进程 stdout。
+/// 故加这条旁路:沙箱内进程把标记写进**白名单目录内**的报告文件,宿主直接读
+/// 文件——不依赖 stdout 捕获,也不依赖重定向能否成功。
+fn report(line: &str) {
+    println!("{line}");
+    if let Ok(path) = std::env::var("AISBX_REPORT") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
 }
 
 /// 对抗用例:**自称**一个无害路径,却**真实访问**另一个路径。
