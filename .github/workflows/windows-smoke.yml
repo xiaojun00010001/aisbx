@@ -20,6 +20,10 @@ jobs:
       - name: Toolchain
         run: rustc -Vv && cargo -V
 
+      # Windows 侧此前从未跑过 cargo test:单测只在 Unix 侧执行过。
+      - name: Unit tests (all crates)
+        run: cargo test --workspace
+
       - name: Smoke (AppContainer + Job + token 闭环, 18 项断言)
         shell: pwsh
         run: |

@@ -31,8 +31,16 @@ jobs:
       - name: Toolchain
         run: rustc -Vv && cargo -V
 
-      - name: Policy contract tests
-        run: cargo test -p aisbx-policy
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      # ⚠️ 此前只跑 `cargo test -p aisbx-policy`,aisbx crate 自身的单测从未进 CI。
+      # 用 --workspace 覆盖全部 crate(含 doctest)。
+      - name: Unit tests (all crates)
+        run: cargo test --workspace
 
       - name: Build
         run: cargo build --bins --example burn
@@ -71,8 +79,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Policy contract tests
-        run: cargo test -p aisbx-policy
+      - name: Toolchain
+        run: rustc -Vv && cargo -V
+      - name: Format check
+        run: cargo fmt --all --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit tests (all crates)
+        run: cargo test --workspace
       - name: Build (Windows backend unchanged)
         run: cargo build --bins --example burn
       - name: Cargo check all targets
