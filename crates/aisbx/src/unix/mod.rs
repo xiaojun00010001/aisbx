@@ -2,5 +2,6 @@
 
 pub mod broker;
 pub mod netproxy;
+pub mod proctree;
 pub mod relay;
 pub mod run;

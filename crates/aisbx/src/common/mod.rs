@@ -1,7 +1,28 @@
-//! 跨平台公共工具:策略加载、路径展开、参数引号。
+//! 跨平台公共工具:策略加载、路径展开、参数引号、L1 越界路径解析。
+
+pub mod pending;
+pub mod stderr_scan;
 
 use aisbx_policy::Policy;
 use std::path::PathBuf;
+
+/// 路径前缀匹配(只统一分隔符与大小写,**不**解析符号链接)。
+///
+/// Windows 侧专用:ACL 授权的是字面路径,而 stderr 里报的是同一个字面路径;
+/// 若走 `canonicalize` 会被改写成 `\\?\C:\...` 形式,反而匹配不上。
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn path_prefix_hit(list: &[String], path: &str) -> bool {
+    let key = |p: &str| {
+        p.replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    let p = key(path);
+    list.iter().any(|base| {
+        let b = key(base);
+        p == b || p.starts_with(&format!("{b}\\"))
+    })
+}
 
 pub fn load_policy(file: &str) -> Result<Policy, String> {
     let raw = std::fs::read_to_string(file).map_err(|e| format!("读取策略失败 {file}: {e}"))?;
@@ -41,7 +62,10 @@ pub fn expand_path(p: &str) -> String {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn expand_all(paths: &[String]) -> Vec<PathBuf> {
-    paths.iter().map(|p| PathBuf::from(expand_path(p))).collect()
+    paths
+        .iter()
+        .map(|p| PathBuf::from(expand_path(p)))
+        .collect()
 }
 
 /// Windows 命令行参数加引号(RC 规则)

@@ -42,7 +42,10 @@ impl Broker {
             let _ = std::fs::remove_file(p);
         }
 
-        let state = Arc::new(Mutex::new(State::new(policy.clone(), command_id.to_string())));
+        let state = Arc::new(Mutex::new(State::new(
+            policy.clone(),
+            command_id.to_string(),
+        )));
         let stop = Arc::new(AtomicBool::new(false));
 
         let esc = bind(&esc_path)?;
@@ -106,7 +109,8 @@ impl Drop for Broker {
 
 fn bind(path: &Path) -> Result<UnixListener, String> {
     let l = UnixListener::bind(path).map_err(|e| format!("绑定 {} 失败: {e}", path.display()))?;
-    l.set_nonblocking(true).map_err(|e| format!("set_nonblocking: {e}"))?;
+    l.set_nonblocking(true)
+        .map_err(|e| format!("set_nonblocking: {e}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -208,7 +212,8 @@ fn decide_file(s: &mut State, req: &EscRequest) -> String {
                 protocol::granted("已按授权 token 放宽下一次执行策略")
             }
             Err(e) => {
-                s.audit.log(&json!({"event": "token.reject", "path": path, "reason": e}));
+                s.audit
+                    .log(&json!({"event": "token.reject", "path": path, "reason": e}));
                 protocol::denied(&format!("授权 token 校验失败: {e}"))
             }
         };
@@ -249,8 +254,14 @@ fn handle_control(state: &Arc<Mutex<State>>, line: &str) -> String {
     match op {
         "issue" => {
             let path = decision::real_path(req.get("path").and_then(|v| v.as_str()).unwrap_or(""));
-            let access = req.get("access").and_then(|v| v.as_str()).unwrap_or("write");
-            let ttl = req.get("ttl_seconds").and_then(|v| v.as_u64()).unwrap_or(300);
+            let access = req
+                .get("access")
+                .and_then(|v| v.as_str())
+                .unwrap_or("write");
+            let ttl = req
+                .get("ttl_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(300);
             if path.is_empty() || !matches!(access, "read" | "write") {
                 return protocol::denied("path 为空或 access 非法");
             }
@@ -272,7 +283,11 @@ fn handle_control(state: &Arc<Mutex<State>>, line: &str) -> String {
             json!({"granted": true, "token": token, "path": path, "access": access, "expires_in": ttl}).to_string()
         }
         "net-issue" => {
-            let host = req.get("host").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let host = req
+                .get("host")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let port = req.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
             if host.is_empty() || port == 0 {
                 return protocol::denied("host/port 非法");
@@ -293,13 +308,21 @@ fn handle_control(state: &Arc<Mutex<State>>, line: &str) -> String {
             json!({"granted": true, "host": host, "port": port, "scope": "task"}).to_string()
         }
         "status" => {
+            // 「待用户授权的越界」必须给**具体路径**,而不只是数量:
+            // agent 要拿它去问用户「允许写 /x/y 吗」,只给个数没法问。
+            // pending 里同时带 precision / attributed,让 agent 能把
+            // 「内核给的精确路径」与「程序自称的路径」区分开来呈现。
             json!({
+                "backend": "unix",
                 "attempt": s.attempt,
-                "violations": s.violations.len(),
-                "granted": s.granted,
+                "retries": s.retries,
+                "needs_approval": s.needs_approval,
+                "pending": s.pending(),
+                "granted_paths": s.granted,
                 "granted_nets": s.granted_nets,
-                "retries": s.retries
-            }).to_string()
+                "violations_total": s.violations.len(),
+            })
+            .to_string()
         }
         other => protocol::denied(&format!("未知控制操作 {other}")),
     }
@@ -309,20 +332,40 @@ fn handle_control(state: &Arc<Mutex<State>>, line: &str) -> String {
 pub fn escalate_client(req: &EscRequest) -> Result<i32, String> {
     let dir = std::env::var("AISBX_BROKER_DIR")
         .map_err(|_| "不在沙箱内:缺少 AISBX_BROKER_DIR".to_string())?;
-    let reply = request(Path::new(&dir).join("esc.sock"), &serde_json::to_string(req).unwrap())?;
+    let reply = request(
+        Path::new(&dir).join("esc.sock"),
+        &serde_json::to_string(req).unwrap(),
+    )?;
     println!("{reply}");
     let v: Value = serde_json::from_str(&reply).unwrap_or_default();
-    Ok(if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) { 0 } else { 1 })
+    Ok(
+        if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) {
+            0
+        } else {
+            1
+        },
+    )
 }
 
 /// 宿主侧 `aisbx authorize`:只需 policy.task 即可定位 ctl.sock。
-pub fn authorize_client(policy: &Policy, path: &str, access: &str, ttl: u64) -> Result<i32, String> {
+pub fn authorize_client(
+    policy: &Policy,
+    path: &str,
+    access: &str,
+    ttl: u64,
+) -> Result<i32, String> {
     let sock = runtime_dir(&policy.task).join("ctl.sock");
     let body = json!({"op":"issue","path":path,"access":access,"ttl_seconds":ttl}).to_string();
     let reply = request(sock, &body)?;
     println!("{reply}");
     let v: Value = serde_json::from_str(&reply).unwrap_or_default();
-    Ok(if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) { 0 } else { 1 })
+    Ok(
+        if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) {
+            0
+        } else {
+            1
+        },
+    )
 }
 
 /// 宿主侧 `aisbx authorize --host <host> --port <port>`:放行代理观察到的目标。
@@ -333,12 +376,21 @@ pub fn authorize_net_client(policy: &Policy, host: &str, port: u16) -> Result<i3
     let reply = request(sock, &body)?;
     println!("{reply}");
     let v: Value = serde_json::from_str(&reply).unwrap_or_default();
-    Ok(if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) { 0 } else { 1 })
+    Ok(
+        if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) {
+            0
+        } else {
+            1
+        },
+    )
 }
 
 /// 宿主侧查询状态(冒烟脚本轮询用)。
 pub fn status_client(policy: &Policy) -> Result<String, String> {
-    request(runtime_dir(&policy.task).join("ctl.sock"), r#"{"op":"status"}"#)
+    request(
+        runtime_dir(&policy.task).join("ctl.sock"),
+        r#"{"op":"status"}"#,
+    )
 }
 
 fn request(sock: PathBuf, body: &str) -> Result<String, String> {
@@ -348,7 +400,9 @@ fn request(sock: PathBuf, body: &str) -> Result<String, String> {
         .map_err(|e| format!("set_read_timeout: {e}"))?;
     writeln!(s, "{body}").map_err(|e| format!("写请求失败: {e}"))?;
     let mut line = String::new();
-    BufReader::new(&s).read_line(&mut line).map_err(|e| format!("读应答失败: {e}"))?;
+    BufReader::new(&s)
+        .read_line(&mut line)
+        .map_err(|e| format!("读应答失败: {e}"))?;
     if line.trim().is_empty() {
         return Err("broker 无应答".into());
     }

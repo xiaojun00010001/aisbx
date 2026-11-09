@@ -49,7 +49,6 @@ impl TokenStore {
         self.map.remove(token);
         Ok(t)
     }
-
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -60,7 +59,12 @@ pub fn random_token() -> String {
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         let mut b = [0u8; 16];
         if f.read_exact(&mut b).is_ok() {
-            return b.iter().map(|x| format!("{x:02x}")).collect();
+            use std::fmt::Write;
+            let mut s = String::with_capacity(b.len() * 2);
+            for x in b {
+                let _ = write!(s, "{x:02x}");
+            }
+            return s;
         }
     }
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);

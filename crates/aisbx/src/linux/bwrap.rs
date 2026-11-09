@@ -29,12 +29,16 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
 
     let mut v: Vec<String> = vec![
         "bwrap".into(),
-        "--ro-bind".into(), "/".into(), "/".into(),
-        "--tmpfs".into(), "/tmp".into(),
-        "--dev".into(), "/dev".into(),
-        "--unshare-user".into(),  // --disable-userns 依赖 user namespace
+        "--ro-bind".into(),
+        "/".into(),
+        "/".into(),
+        "--tmpfs".into(),
+        "/tmp".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--unshare-user".into(), // --disable-userns 依赖 user namespace
         "--unshare-pid".into(),
-        "--unshare-net".into(),   // 外网默认全断;helper 里把 lo 置 up 放行回环
+        "--unshare-net".into(), // 外网默认全断;helper 里把 lo 置 up 放行回环
         "--disable-userns".into(), // 防沙箱内自建 userns 后 mount/umount 拆掉只读 bind
         "--clearenv".into(),
     ];
@@ -92,9 +96,14 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
         ("AISBX_TOKEN", ctx.token.clone()),
         (
             "AISBX_CLI",
-            std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
         ),
-        ("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())),
+        (
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+        ),
         ("HOME", std::env::var("HOME").unwrap_or_default()),
     ];
     for (k, val) in envs {

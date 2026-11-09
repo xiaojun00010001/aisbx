@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_NONE, OPEN_EXISTING};
 
 use aisbx_policy::Policy;
@@ -46,8 +48,8 @@ impl Drop for NetProxy {
 }
 
 pub fn start(net_state: Arc<Mutex<NetState>>, audit: Arc<Audit>) -> Result<NetProxy, String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("Windows 网络代理监听失败: {e}"))?;
+    let listener =
+        TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Windows 网络代理监听失败: {e}"))?;
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     let _ = listener.set_nonblocking(true);
     let stop = Arc::new(AtomicBool::new(false));
@@ -72,7 +74,11 @@ pub fn start(net_state: Arc<Mutex<NetState>>, audit: Arc<Audit>) -> Result<NetPr
     Ok(NetProxy { port, stop })
 }
 
-fn handle_client(mut stream: TcpStream, state: &Arc<Mutex<NetState>>, audit: &Arc<Audit>) -> Result<(), String> {
+fn handle_client(
+    mut stream: TcpStream,
+    state: &Arc<Mutex<NetState>>,
+    audit: &Arc<Audit>,
+) -> Result<(), String> {
     // Windows 上 accept 返回的 socket 会继承 listener 的非阻塞标志;不设回阻塞时,
     // SOCKS5 等第二个报文的 read_exact 会立刻 WouldBlock 并关闭连接。
     stream.set_nonblocking(false).map_err(|e| e.to_string())?;
@@ -92,12 +98,13 @@ fn handle_client(mut stream: TcpStream, state: &Arc<Mutex<NetState>>, audit: &Ar
             break;
         }
     }
-    let mut parts = first.trim().split_whitespace();
+    let mut parts = first.split_whitespace();
     if !parts.next().unwrap_or("").eq_ignore_ascii_case("CONNECT") {
         return write_http(&mut stream, 405, "only CONNECT/SOCKS5 are supported");
     }
     let target = parts.next().unwrap_or("");
-    let (host, port) = parse_authority(target).ok_or_else(|| format!("非法 CONNECT 目标 {target}"))?;
+    let (host, port) =
+        parse_authority(target).ok_or_else(|| format!("非法 CONNECT 目标 {target}"))?;
 
     if !decide(state, audit, &host, port) {
         return write_http(&mut stream, 403, "aisbx: user approval not granted");
@@ -110,10 +117,16 @@ fn handle_client(mut stream: TcpStream, state: &Arc<Mutex<NetState>>, audit: &Ar
 
 /// SOCKS5(NO-AUTH + CONNECT):与 HTTP CONNECT 复用同一套裁决与授权清单,
 /// 目标由 ATYP/DST.ADDR 自带,覆盖 `ALL_PROXY=socks5h://` 的客户端。
-fn handle_socks5(mut stream: TcpStream, state: &Arc<Mutex<NetState>>, audit: &Arc<Audit>) -> Result<(), String> {
+fn handle_socks5(
+    mut stream: TcpStream,
+    state: &Arc<Mutex<NetState>>,
+    audit: &Arc<Audit>,
+) -> Result<(), String> {
     use std::io::Read;
     let mut greeting = [0u8; 2];
-    stream.read_exact(&mut greeting).map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut greeting)
+        .map_err(|e| e.to_string())?;
     let mut methods = vec![0u8; greeting[1] as usize];
     stream.read_exact(&mut methods).map_err(|e| e.to_string())?;
     if !methods.contains(&0) {
@@ -127,14 +140,20 @@ fn handle_socks5(mut stream: TcpStream, state: &Arc<Mutex<NetState>>, audit: &Ar
         0x01 => {
             let mut b = [0u8; 4];
             stream.read_exact(&mut b).map_err(|e| e.to_string())?;
-            (format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]), win_read_port(&mut stream)?)
+            (
+                format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]),
+                win_read_port(&mut stream)?,
+            )
         }
         0x03 => {
             let mut len = [0u8; 1];
             stream.read_exact(&mut len).map_err(|e| e.to_string())?;
             let mut b = vec![0u8; len[0] as usize];
             stream.read_exact(&mut b).map_err(|e| e.to_string())?;
-            (String::from_utf8_lossy(&b).to_string(), win_read_port(&mut stream)?)
+            (
+                String::from_utf8_lossy(&b).to_string(),
+                win_read_port(&mut stream)?,
+            )
         }
         _ => {
             let _ = stream.write_all(&[5, 8, 0, 1, 0, 0, 0, 0, 0, 0]);
@@ -142,10 +161,14 @@ fn handle_socks5(mut stream: TcpStream, state: &Arc<Mutex<NetState>>, audit: &Ar
         }
     };
     if !decide(state, audit, &host, port) {
-        stream.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]).map_err(|e| e.to_string())?;
+        stream
+            .write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0])
+            .map_err(|e| e.to_string())?;
         return Ok(());
     }
-    stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).map_err(|e| e.to_string())?;
+    stream
+        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+        .map_err(|e| e.to_string())?;
     let src = stream.try_clone().map_err(|e| e.to_string())?;
     tunnel(stream, src, &host, port, audit)
 }
@@ -195,7 +218,13 @@ fn decide(state: &Arc<Mutex<NetState>>, audit: &Arc<Audit>, host: &str, port: u1
     }
 }
 
-fn tunnel(stream: TcpStream, mut src: TcpStream, host: &str, port: u16, audit: &Arc<Audit>) -> Result<(), String> {
+fn tunnel(
+    stream: TcpStream,
+    mut src: TcpStream,
+    host: &str,
+    port: u16,
+    audit: &Arc<Audit>,
+) -> Result<(), String> {
     stream.set_read_timeout(None).ok();
     // 策略已放行即回成功:CI 常无外网,不应让「上游不可达」掩盖「授权已生效」。
     let mut upstream = match TcpStream::connect((host, port)) {
@@ -232,7 +261,9 @@ fn write_http(stream: &mut TcpStream, code: u16, body: &str) -> Result<(), Strin
         "HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(msg.as_bytes())
+        .map_err(|e| e.to_string())?;
     let _ = stream.flush();
     Ok(())
 }
@@ -265,7 +296,10 @@ fn is_forbidden_ip(ip: &IpAddr) -> bool {
         }
         IpAddr::V6(v) => {
             let s = v.segments();
-            v.is_loopback() || v.is_unspecified() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+            v.is_loopback()
+                || v.is_unspecified()
+                || (s[0] & 0xfe00) == 0xfc00
+                || (s[0] & 0xffc0) == 0xfe80
         }
     }
 }
@@ -308,9 +342,17 @@ pub fn authorize_net_client(policy: &Policy, host: &str, port: u16) -> Result<i3
             std::ptr::null_mut(),
         );
         CloseHandle(h);
-        let reply = String::from_utf8_lossy(&buf[..n as usize]).trim().to_string();
+        let reply = String::from_utf8_lossy(&buf[..n as usize])
+            .trim()
+            .to_string();
         println!("{reply}");
         let v: Value = serde_json::from_str(&reply).unwrap_or_default();
-        Ok(if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) { 0 } else { 1 })
+        Ok(
+            if v.get("granted").and_then(|x| x.as_bool()).unwrap_or(false) {
+                0
+            } else {
+                1
+            },
+        )
     }
 }

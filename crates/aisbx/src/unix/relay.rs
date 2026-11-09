@@ -22,7 +22,8 @@ pub fn entry(args: &[String]) -> Result<i32, String> {
     use std::os::unix::process::CommandExt;
 
     let raw = args.first().ok_or("__unix_entry 缺少命令 JSON")?;
-    let cmd: Vec<String> = serde_json::from_str(raw).map_err(|e| format!("命令 JSON 解析失败: {e}"))?;
+    let cmd: Vec<String> =
+        serde_json::from_str(raw).map_err(|e| format!("命令 JSON 解析失败: {e}"))?;
     if cmd.is_empty() {
         return Err("空命令".into());
     }
@@ -41,7 +42,7 @@ pub fn entry(args: &[String]) -> Result<i32, String> {
     // 实测:Seatbelt 只为由 sandbox-exec 直接 exec 的进程上报 violation 日志,
     // 再 spawn 一层会导致内核不上报,P1 的按 PID 归属因此失效。
     let exe = std::env::current_exe().map_err(|e| format!("取当前 exe 失败: {e}"))?;
-    let _relay = Command::new(&exe)
+    let _relay = Command::new(exe)
         .args(["__relay_only", &port.to_string(), &broker_dir, &command_id])
         .spawn()
         .map_err(|e| format!("启动沙箱内 relay 失败: {e}"))?;
@@ -89,7 +90,11 @@ fn report_pid(broker_dir: &str, command_id: &str, pid: u32) {
     let Ok(mut s) = UnixStream::connect(sock) else {
         return; // best-effort:broker 不可达时 P1 退化为无归属,能力报告已标 partial
     };
-    let _ = writeln!(s, "{}", json!({"op":"pid","pid":pid,"command_id":command_id}));
+    let _ = writeln!(
+        s,
+        "{}",
+        json!({"op":"pid","pid":pid,"command_id":command_id})
+    );
     let mut line = String::new();
     let _ = BufReader::new(&s).read_line(&mut line);
 }
@@ -121,7 +126,11 @@ fn serve(listener: TcpListener, net_sock: PathBuf, command_id: String) {
     }
 }
 
-fn handle_client(mut stream: TcpStream, net_sock: PathBuf, command_id: String) -> Result<(), String> {
+fn handle_client(
+    mut stream: TcpStream,
+    net_sock: PathBuf,
+    command_id: String,
+) -> Result<(), String> {
     // 隧道需要阻塞读:Windows 的 accept 会继承 listener 的非阻塞标志,这里统一设回。
     stream.set_nonblocking(false).map_err(|e| e.to_string())?;
     stream
@@ -145,7 +154,7 @@ fn handle_client(mut stream: TcpStream, net_sock: PathBuf, command_id: String) -
         }
     }
 
-    let mut parts = first.trim().split_whitespace();
+    let mut parts = first.split_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
     let (host, port) = if method.eq_ignore_ascii_case("CONNECT") {
@@ -180,11 +189,17 @@ fn handle_client(mut stream: TcpStream, net_sock: PathBuf, command_id: String) -
 
 /// SOCKS5(仅 NO-AUTH + CONNECT):目标由握手报文里的 ATYP/DST.ADDR 自带,
 /// 与 HTTP CONNECT 走同一条宿主裁决通道,覆盖 `ALL_PROXY=socks5h://` 的客户端。
-fn handle_socks5(mut stream: TcpStream, net_sock: PathBuf, command_id: String) -> Result<(), String> {
+fn handle_socks5(
+    mut stream: TcpStream,
+    net_sock: PathBuf,
+    command_id: String,
+) -> Result<(), String> {
     use std::io::Read;
 
     let mut greeting = [0u8; 2];
-    stream.read_exact(&mut greeting).map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut greeting)
+        .map_err(|e| e.to_string())?;
     let mut methods = vec![0u8; greeting[1] as usize];
     stream.read_exact(&mut methods).map_err(|e| e.to_string())?;
     if !methods.contains(&0) {
@@ -199,14 +214,20 @@ fn handle_socks5(mut stream: TcpStream, net_sock: PathBuf, command_id: String) -
         0x01 => {
             let mut b = [0u8; 4];
             stream.read_exact(&mut b).map_err(|e| e.to_string())?;
-            (format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]), read_port(&mut stream)?)
+            (
+                format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3]),
+                read_port(&mut stream)?,
+            )
         }
         0x03 => {
             let mut len = [0u8; 1];
             stream.read_exact(&mut len).map_err(|e| e.to_string())?;
             let mut b = vec![0u8; len[0] as usize];
             stream.read_exact(&mut b).map_err(|e| e.to_string())?;
-            (String::from_utf8_lossy(&b).to_string(), read_port(&mut stream)?)
+            (
+                String::from_utf8_lossy(&b).to_string(),
+                read_port(&mut stream)?,
+            )
         }
         _ => {
             let _ = stream.write_all(&[5, 8, 0, 1, 0, 0, 0, 0, 0, 0]);
@@ -215,10 +236,14 @@ fn handle_socks5(mut stream: TcpStream, net_sock: PathBuf, command_id: String) -
     };
     let (uds, allowed) = ask_host(&net_sock, &command_id, &host, port)?;
     if !allowed {
-        stream.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]).map_err(|e| e.to_string())?;
+        stream
+            .write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0])
+            .map_err(|e| e.to_string())?;
         return Ok(());
     }
-    stream.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).map_err(|e| e.to_string())?;
+    stream
+        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+        .map_err(|e| e.to_string())?;
     stream.set_read_timeout(None).ok();
     let _ = uds.set_read_timeout(None);
 
@@ -244,7 +269,12 @@ fn read_port(stream: &mut TcpStream) -> Result<u16, String> {
 }
 
 /// 向宿主代理申请一次目标裁决。返回同一条 UDS 连接,放行后直接作为数据通道。
-fn ask_host(net_sock: &PathBuf, command_id: &str, host: &str, port: u16) -> Result<(UnixStream, bool), String> {
+fn ask_host(
+    net_sock: &PathBuf,
+    command_id: &str,
+    host: &str,
+    port: u16,
+) -> Result<(UnixStream, bool), String> {
     let mut uds = UnixStream::connect(net_sock).map_err(|e| format!("宿主代理不可达: {e}"))?;
     let req = json!({
         "op": "connect", "host": host, "port": port,
@@ -255,7 +285,10 @@ fn ask_host(net_sock: &PathBuf, command_id: &str, host: &str, port: u16) -> Resu
     let mut line = String::new();
     read_line_unbuffered(&uds, &mut line)?;
     let reply: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
-    let allowed = reply.get("allow").and_then(|v| v.as_bool()).unwrap_or(false);
+    let allowed = reply
+        .get("allow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     Ok((uds, allowed))
 }
 
@@ -292,7 +325,9 @@ fn write_http(stream: &mut TcpStream, code: u16, body: &str) -> Result<(), Strin
         "HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(msg.as_bytes())
+        .map_err(|e| e.to_string())?;
     let _ = stream.flush();
     Ok(())
 }

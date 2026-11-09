@@ -8,10 +8,10 @@ mod core;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(unix)]
-mod unix;
 #[cfg(windows)]
 mod run;
+#[cfg(unix)]
+mod unix;
 #[cfg(windows)]
 mod win;
 
@@ -23,7 +23,9 @@ fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("aisbx: 错误: {e}");
-            eprintln!("用法: aisbx run -p <policy.json> [--json] [--require-full] -- <命令> [参数...]");
+            eprintln!(
+                "用法: aisbx run -p <policy.json> [--json] [--require-full] -- <命令> [参数...]"
+            );
             eprintln!("      aisbx escalate -p <policy.json> --path <路径> --access read|write [--token <tok>]");
             eprintln!("      aisbx escalate --op net --host <host> --ip <ip> --port <port>");
             eprintln!("      aisbx authorize -p <policy.json> --path <路径> --access read|write [--ttl-seconds 300]");
@@ -137,7 +139,7 @@ fn cmd_run(args: &[String]) -> Result<i32, String> {
 
     #[cfg(windows)]
     {
-        return crate::run::run_windows(&policy, &policy_file, &cmd, json);
+        crate::run::run_windows(&policy, &policy_file, &cmd, json)
     }
     #[cfg(target_os = "linux")]
     {
@@ -145,7 +147,7 @@ fn cmd_run(args: &[String]) -> Result<i32, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        return macos::run_macos(&policy, &policy_file, &cmd, json);
+        macos::run_macos(&policy, &policy_file, &cmd, json)
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
@@ -167,8 +169,11 @@ fn cmd_escalate(args: &[String]) -> Result<i32, String> {
     }
     let token = flag_value(args, "--token")
         .or_else(|| {
-            flag_value(args, "--token-file")
-                .and_then(|f| std::fs::read_to_string(f).ok().map(|s| s.trim().to_string()))
+            flag_value(args, "--token-file").and_then(|f| {
+                std::fs::read_to_string(f)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            })
         })
         .unwrap_or_default();
     let policy = load_policy(&policy_file)?;
@@ -178,7 +183,7 @@ fn cmd_escalate(args: &[String]) -> Result<i32, String> {
         if op != "file" {
             return Err("Windows 后端的 --op net CLI 尚未封装(见 docs/03 §2.2)".into());
         }
-        return crate::win::broker::escalate_client(&policy, &path, &access, &token);
+        crate::win::broker::escalate_client(&policy, &path, &access, &token)
     }
     #[cfg(unix)]
     {
@@ -249,7 +254,7 @@ fn cmd_authorize(args: &[String]) -> Result<i32, String> {
 
     #[cfg(windows)]
     {
-        return crate::win::broker::authorize_client(&policy, &path, &access, ttl);
+        crate::win::broker::authorize_client(&policy, &path, &access, ttl)
     }
     #[cfg(unix)]
     {
@@ -270,10 +275,15 @@ fn cmd_status(args: &[String]) -> Result<i32, String> {
         println!("{}", unix::broker::status_client(&policy)?);
         Ok(0)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        println!("{}", crate::win::broker::status_client(&policy)?);
+        Ok(0)
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = policy;
-        println!("{{\"backend\":\"windows\",\"status\":\"ok\"}}");
+        println!("{{\"backend\":\"unsupported\",\"status\":\"ok\"}}");
         Ok(0)
     }
 }

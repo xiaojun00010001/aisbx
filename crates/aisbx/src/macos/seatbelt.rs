@@ -29,12 +29,26 @@ pub fn profile(policy: &Policy, ctx: &RunCtx) -> String {
     // 也不放开其它本机 socket(避免 docker.sock 类逃逸);两种路径拼写都登记以兼容 /var ↔ /private/var。
     let broker_dir = canon(&ctx.broker_dir.to_string_lossy());
     let esc_canon = format!("{broker_dir}/esc.sock");
-    let esc_raw = ctx.broker_dir.join("esc.sock").to_string_lossy().to_string();
+    let esc_raw = ctx
+        .broker_dir
+        .join("esc.sock")
+        .to_string_lossy()
+        .to_string();
     let net_canon = format!("{broker_dir}/net.sock");
-    let net_raw = ctx.broker_dir.join("net.sock").to_string_lossy().to_string();
-    out.push_str(&format!("(allow file-read* (subpath \"{}\"))\n", esc(&broker_dir)));
+    let net_raw = ctx
+        .broker_dir
+        .join("net.sock")
+        .to_string_lossy()
+        .to_string();
+    out.push_str(&format!(
+        "(allow file-read* (subpath \"{}\"))\n",
+        esc(&broker_dir)
+    ));
     for sock in [esc_canon, esc_raw, net_canon, net_raw] {
-        out.push_str(&format!("(allow network* (local unix-socket (subpath \"{}\")))\n", esc(&sock)));
+        out.push_str(&format!(
+            "(allow network* (local unix-socket (subpath \"{}\")))\n",
+            esc(&sock)
+        ));
     }
     // 写入:仅策略白名单 + 用户授权路径(B 契约:授权进入下一次执行的策略快照)
     out.push_str("(allow file-write* (literal \"/dev/null\"))\n");

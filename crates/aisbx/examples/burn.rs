@@ -8,6 +8,15 @@ fn main() {
         Some("spin") => spin(args.get(1).and_then(|v| v.parse().ok()).unwrap_or(5)),
         Some("fork") => fork(args.get(1).and_then(|v| v.parse().ok()).unwrap_or(10)),
         Some("write") => write(args.get(1).map(|s| s.as_str()).unwrap_or("")),
+        Some("stderrdeny") => stderrdeny(args.get(1).map(|s| s.as_str()).unwrap_or("")),
+        Some("spoof") => spoof(
+            args.get(1).map(|s| s.as_str()).unwrap_or(""),
+            args.get(2).map(|s| s.as_str()).unwrap_or(""),
+        ),
+        Some("probe2") => probe2(
+            args.get(1).map(|s| s.as_str()).unwrap_or(""),
+            args.get(2).map(|s| s.as_str()).unwrap_or(""),
+        ),
         Some("flow") => flow(&args[1..]),
         Some("retryflow") => retryflow(&args[1..]),
         Some("proxy") => proxy(
@@ -24,7 +33,7 @@ fn main() {
             args.get(2).and_then(|v| v.parse().ok()).unwrap_or(80),
         ),
         _ => {
-            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | conn <host> <port> | proxy|socks <host> <port> | flow <policy> <tokenFile> <target> <grant|deny>");
+            eprintln!("usage: burn mem <mb> | spin <sec> | fork <n> | write <path> | stderrdeny <path> | conn <host> <port> | proxy|socks <host> <port> | flow <policy> <tokenFile> <target> <grant|deny>");
             2
         }
     };
@@ -39,7 +48,10 @@ fn mem(mb: usize) -> i32 {
     for i in (0..n).step_by(4096) {
         v[i] = 1;
     }
-    println!("allocated {mb} MB, sum={}", v.iter().map(|&b| b as u64).sum::<u64>());
+    println!(
+        "allocated {mb} MB, sum={}",
+        v.iter().map(|&b| b as u64).sum::<u64>()
+    );
     0
 }
 
@@ -77,7 +89,11 @@ fn fork(n: u32) -> i32 {
         let _ = c.wait();
     }
     println!("spawned {ok}/{n}");
-    if ok == n { 0 } else { 2 }
+    if ok == n {
+        0
+    } else {
+        2
+    }
 }
 
 /// 授权闭环载荷(运行在沙箱内):等待宿主写入 token 文件 → 消费 token →
@@ -108,7 +124,9 @@ fn flow(args: &[String]) -> i32 {
         // 不能用 Stdio::null():AppContainer 内打开 NUL 设备被拒(os error 5),
         // 默认继承父进程句柄即可,输出随 flow 一起落盘,反而便于取证。
         match Command::new(&exe)
-            .args(["escalate", "-p", &policy, "--path", &target, "--access", "write", "--token", token])
+            .args([
+                "escalate", "-p", &policy, "--path", &target, "--access", "write", "--token", token,
+            ])
             .status()
         {
             Ok(s) => s.code().unwrap_or(1),
@@ -188,7 +206,10 @@ fn proxy(host: &str, port: u16) -> i32 {
         }
     };
     let _ = s.set_read_timeout(Some(Duration::from_secs(25)));
-    if let Err(e) = write!(s, "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n") {
+    if let Err(e) = write!(
+        s,
+        "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
+    ) {
         eprintln!("proxy: 发送 CONNECT 失败: {e}");
         return 1;
     }
@@ -282,7 +303,11 @@ fn loopback() -> i32 {
     let ok = TcpStream::connect(("127.0.0.1", port)).is_ok();
     let _ = handle.join();
     println!("loopback={}", if ok { "ok" } else { "fail" });
-    if ok { 0 } else { 1 }
+    if ok {
+        0
+    } else {
+        1
+    }
 }
 
 /// 方案 B 的端到端载荷:第一次执行被拒并上报,授权后由 launcher 重跑(attempt=2)。
@@ -323,7 +348,16 @@ fn retryflow(args: &[String]) -> i32 {
         let e = escalate(&["--path", &target, "--access", "write"]);
         println!("escalate={e}");
         // 网络越界的拒绝感知与上报
-        let n = escalate(&["--op", "net", "--host", "example.com", "--ip", "1.1.1.1", "--port", "443"]);
+        let n = escalate(&[
+            "--op",
+            "net",
+            "--host",
+            "example.com",
+            "--ip",
+            "1.1.1.1",
+            "--port",
+            "443",
+        ]);
         println!("net_escalate={n}");
         // 非零退出触发 launcher 以新策略快照重跑(leaked 已打印,不影响返回)
         let _ = leaked;
@@ -339,7 +373,11 @@ fn retryflow(args: &[String]) -> i32 {
     if mode == "deny" {
         return 1; // 黑名单用例不应走到成功重跑
     }
-    if wrote && e1 == 0 && e2 != 0 { 0 } else { 1 }
+    if wrote && e1 == 0 && e2 != 0 {
+        0
+    } else {
+        1
+    }
 }
 
 /// 向 path 写入一个字节。成功 0 / 失败(ACL 拒绝等)1 / 参数缺失 2。
@@ -358,6 +396,61 @@ fn write(path: &str) -> i32 {
             eprintln!("write failed: {e}");
             1
         }
+    }
+}
+
+/// 输出 .NET / PowerShell 形态的拒绝消息,用于验证 L1 采集链路。
+///
+/// 真实形态由 .NET 的 `UnauthorizedAccessException` 产生:
+///   `Write-Error: Access to the path 'C:\ws\out.txt' is denied.`
+/// Rust 标准库的 `io::Error` **不带路径**(实测 `Permission denied (os error 5)`),
+/// 所以 Windows 上要验证 L1 必须用这个形态的载荷。
+fn stderrdeny(path: &str) -> i32 {
+    // 真的尝试写:被拒 → 打印带路径的 .NET 形态消息(供 L1 采集);被授权 → 写成功。
+    // 这样「拒绝 → 授权 → 重跑成功」是真实链路,不是演出来的。
+    match std::fs::write(path, b"x") {
+        Ok(_) => {
+            println!("wrote {path}");
+            0
+        }
+        Err(_) => {
+            eprintln!("Write-Error: Access to the path '{path}' is denied.");
+            1
+        }
+    }
+}
+
+/// 一次 run 内验证「授权粒度不外溢」。
+///
+/// 1) 先尝试创建 `newp`(白名单外 → 被拒 → 打印带路径的 .NET 形态消息供 L1 采集);
+/// 2) **不退出**,再尝试写 `oldp`(同目录下的既有文件)。
+///    若授权外溢(父目录被授了 Modify),第 2 步会成功 → 打印 `EXISTING_WRITEABLE`。
+///
+/// 返回值位标志:bit0 = newp 创建成功,bit1 = oldp 写成功。
+fn probe2(newp: &str, oldp: &str) -> i32 {
+    let mut flags = 0;
+    match std::fs::write(newp, b"x") {
+        Ok(_) => {
+            println!("NEW_CREATED {newp}");
+            flags |= 1;
+        }
+        Err(_) => {
+            eprintln!("Write-Error: Access to the path '{newp}' is denied.");
+        }
+    }
+    match std::fs::write(oldp, b"x") {
+        Ok(_) => {
+            println!("EXISTING_WRITEABLE {oldp}");
+            flags |= 2;
+        }
+        Err(_) => println!("EXISTING_DENIED {oldp}"),
+    }
+    // 返回码只反映「目标文件能否创建」:被拒 → 非 0(launcher 才会等授权并重跑);
+    // 「既有文件是否可写」通过输出标记表达,不影响退出码。
+    if flags & 1 != 0 {
+        0
+    } else {
+        1
     }
 }
 
@@ -382,4 +475,28 @@ fn conn(host: &str, port: u16) -> i32 {
         }
     }
     1
+}
+
+/// 对抗用例:**自称**一个无害路径,却**真实访问**另一个路径。
+///
+/// 用来检验两个感知通道的可信度差异,以及「L1 路径可伪造」是否构成越权:
+/// - L2(内核日志,macOS):采到的应是**真实被拒的路径**(内核不受欺骗);
+/// - L1(stderr 自报):只能采到**自称的路径**(程序想报什么就报什么);
+/// - 授权自称路径后,真实路径**仍应被内核拒绝** → 伪造换不来越权。
+fn spoof(claimed: &str, actual: &str) -> i32 {
+    // 先真的尝试访问 actual(被拒 → 内核日志会记下真实路径)
+    let denied = std::fs::write(actual, b"x").is_err();
+    if denied {
+        println!("ACTUAL_DENIED {actual}");
+    } else {
+        println!("ACTUAL_WRITABLE {actual}");
+    }
+    // 再自称一个「被拒」的路径(内核从未拒绝过它 → 只有 stderr 里有)
+    eprintln!("sh: {claimed}: Operation not permitted");
+    println!("CLAIMED_REPORTED {claimed}");
+    if denied {
+        1
+    } else {
+        0
+    }
 }

@@ -7,13 +7,12 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
     JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation, SetInformationJobObject,
-    TerminateJobObject, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
+    TerminateJobObject, JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
     JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_UILIMIT_GLOBALATOMS,
     JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
-    JOBOBJECT_BASIC_UI_RESTRICTIONS,
 };
 
 use aisbx_policy::ResourcePolicy;
@@ -40,7 +39,7 @@ pub fn create(policy: &ResourcePolicy) -> Result<Job, String> {
             flags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
         }
         if let Some(n) = policy.active_processes {
-            eli.BasicLimitInformation.ActiveProcessLimit = n as u32;
+            eli.BasicLimitInformation.ActiveProcessLimit = n;
             flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
         }
         eli.BasicLimitInformation.LimitFlags = flags;
@@ -55,7 +54,8 @@ pub fn create(policy: &ResourcePolicy) -> Result<Job, String> {
         if let Some(pct) = policy.cpu_percent {
             // CpuRate 单位为万分之一(0.01%),50% = 5000
             let mut crc: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = std::mem::zeroed();
-            crc.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+            crc.ControlFlags =
+                JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
             crc.Anonymous.CpuRate = (pct as u32).saturating_mul(100).min(10000);
             r2 = SetInformationJobObject(
                 h,
@@ -67,8 +67,9 @@ pub fn create(policy: &ResourcePolicy) -> Result<Job, String> {
 
         // UI 隔离:防剪贴板读取/写入与全局原子表
         let mut uir: JOBOBJECT_BASIC_UI_RESTRICTIONS = std::mem::zeroed();
-        uir.UIRestrictionsClass =
-            JOB_OBJECT_UILIMIT_READCLIPBOARD | JOB_OBJECT_UILIMIT_WRITECLIPBOARD | JOB_OBJECT_UILIMIT_GLOBALATOMS;
+        uir.UIRestrictionsClass = JOB_OBJECT_UILIMIT_READCLIPBOARD
+            | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+            | JOB_OBJECT_UILIMIT_GLOBALATOMS;
         let r3 = SetInformationJobObject(
             h,
             JobObjectBasicUIRestrictions,

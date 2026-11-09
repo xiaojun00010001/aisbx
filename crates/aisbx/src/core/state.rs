@@ -6,9 +6,18 @@ use serde_json::{json, Value};
 use super::audit::Audit;
 use super::protocol::EscRequest;
 use super::tokens::TokenStore;
+use crate::common::pending::PendingViolation;
 
 /// 一次真实越界。三平台、三种采集来源统一成同一条对外事件。
 /// source: "explicit"(程序主动上报) | "proxy"(网络代理) | "sandbox-log"(内核违规日志)
+///
+/// `precision` 标注这条越界信息的路径精度,决定它能被用到什么程度:
+/// - "exact":内核或协议**自带**的精确绝对路径(Seatbelt violation 日志、
+///   代理 CONNECT 目标)。可直接用于生成授权请求。
+/// - "reported":程序**自己声称**的路径(stderr 自报 / 沙箱内主动 escalate)。
+///   可用于生成授权请求(最坏情况是多问一次用户),**不可用于自动放行**——
+///   被沙箱约束的程序可以自称一个无害路径来骗过采集器。
+/// - "none":拿不到具体目标。
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Violation {
     pub event: String,
@@ -22,6 +31,11 @@ pub struct Violation {
     pub reason: String,
     pub command_id: String,
     pub source: String,
+    pub precision: String,
+    /// 能否证明这次越界来自本次沙箱执行。
+    /// false = 路径精确(内核给的),但没能归属到本次执行(例如违规进程已退出
+    /// 且不在已知 PID 集合内)。这类条目只能用于生成授权请求,**不能自动放行**。
+    pub attributed: bool,
 }
 
 impl Violation {
@@ -91,6 +105,10 @@ impl State {
             reason: reason.into(),
             command_id: self.command_id.clone(),
             source: "proxy".into(),
+            // CONNECT 目标由协议自带,不是我们从命令里猜的 → 精确。
+            precision: "exact".into(),
+            // 代理是自己在数据路径上观察到的 → 天然归属于本次执行。
+            attributed: true,
         };
         self.emit_event(v.to_value());
         self.violations.push(v);
@@ -98,7 +116,13 @@ impl State {
 
     /// 记一次内核违规日志采集到的文件越界(P1,程序零配合)。
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub fn external_file_violation(&mut self, path: &str, access: &str, pid: u32) {
+    pub fn external_file_violation(
+        &mut self,
+        path: &str,
+        access: &str,
+        pid: u32,
+        attributed: bool,
+    ) {
         if self
             .violations
             .iter()
@@ -118,14 +142,89 @@ impl State {
             reason: "needs-approval".into(),
             command_id: self.command_id.clone(),
             source: "sandbox-log".into(),
+            // 内核日志自带被拒的完整精确路径 → 精确。
+            precision: "exact".into(),
+            attributed,
         };
         self.emit_event(json!({
             "event": "violation.captured", "source": "sandbox-log",
-            "path": path, "access": access, "pid": pid, "command_id": self.command_id
+            "path": path, "access": access, "pid": pid,
+            "attributed": attributed, "command_id": self.command_id
         }));
         self.emit_event(v.to_value());
         self.violations.push(v);
         self.needs_approval = true;
+    }
+
+    /// 记一次【未能归属到本次执行】的内核违规日志条目。
+    ///
+    /// 它**不是**我们的越界:极可能是同机其它沙箱/应用的违规(实测能捞到
+    /// Chrome、wifip2pd 的记录)。所以它只进审计与事件流,**不进 violations
+    /// 列表、不置 needs_approval** —— 否则等于让用户去授权一个毫不相干的
+    /// 路径(真实越权风险),而且还能被拿来伪造「真实拒绝」骗过 token 签发。
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn unattributed_file_violation(&mut self, path: &str, access: &str, pid: u32) {
+        self.emit_event(json!({
+            "event": "violation.unattributed", "source": "sandbox-log",
+            "path": path, "access": access, "pid": pid, "attributed": false,
+            "reason": "not attributable to this execution", "command_id": self.command_id
+        }));
+    }
+
+    /// 记一次【程序自报】的文件越界(L1:从被跑程序的 stderr 里提取)。
+    ///
+    /// 归属**确定**(stderr 来自本次执行的进程,不像内核日志会混进同机其它
+    /// 应用的违规),但路径是程序**自称**的,可被伪造 → `precision="reported"`,
+    /// 只用于生成授权请求,**绝不自动放行**。
+    ///
+    /// 若同一路径已被内核日志(L2)采集,这里跳过:L2 的路径是内核给的,更可信。
+    pub fn self_reported_file_violation(&mut self, path: &str, access: &str) {
+        if self
+            .violations
+            .iter()
+            .any(|v| v.kind == "file" && v.path == path)
+        {
+            return;
+        }
+        let v = Violation {
+            event: "violation".into(),
+            attempt: self.attempt,
+            kind: "file".into(),
+            path: path.into(),
+            access: access.into(),
+            host: String::new(),
+            ip: String::new(),
+            port: 0,
+            reason: "needs-approval".into(),
+            command_id: self.command_id.clone(),
+            source: "stderr-selfreport".into(),
+            precision: "reported".into(),
+            attributed: true,
+        };
+        self.needs_approval = true;
+        self.emit_event(v.to_value());
+        self.violations.push(v);
+    }
+
+    /// 等待用户授权的越界列表(可直接呈现给用户)。
+    ///
+    /// 只取 `reason == "needs-approval"` 的条目:黑名单拒绝、策略拒绝等
+    /// 不该拿去问用户(问了也是白问——策略已经定了)。
+    pub fn pending(&self) -> Vec<PendingViolation> {
+        self.violations
+            .iter()
+            .filter(|v| v.reason == "needs-approval")
+            .map(|v| PendingViolation {
+                kind: v.kind.clone(),
+                path: v.path.clone(),
+                access: v.access.clone(),
+                host: v.host.clone(),
+                port: v.port,
+                source: v.source.clone(),
+                precision: v.precision.clone(),
+                attributed: v.attributed,
+            })
+            .collect()
     }
 
     /// 运行中放行一个网络目标(仅本次任务,不写回基线策略文件)。
@@ -163,6 +262,10 @@ impl State {
             reason: reason.into(),
             command_id: self.command_id.clone(),
             source: "explicit".into(),
+            // 程序自己声称的路径,可被伪造 → 只能用于生成授权请求,不能自动放行。
+            precision: "reported".into(),
+            // 程序是本次沙箱内的进程,自报即归属于本次执行。
+            attributed: true,
         };
         if reason == "needs-approval" {
             self.needs_approval = true;
@@ -185,7 +288,11 @@ impl State {
 
     /// 新策略必须严格宽于旧策略:仅在既有白名单之外追加授权路径。
     pub fn widen(&mut self, path: &str) {
-        if !self.granted.iter().any(|p| super::decision::compare_key(p) == super::decision::compare_key(path)) {
+        if !self
+            .granted
+            .iter()
+            .any(|p| super::decision::compare_key(p) == super::decision::compare_key(path))
+        {
             let in_policy = super::decision::is_prefix_hit(&self.policy.filesystem.write, path)
                 || super::decision::is_prefix_hit(&self.policy.filesystem.read, path);
             if !in_policy {

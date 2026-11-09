@@ -4,11 +4,13 @@
 //! - 沙箱内配套客户端 `aisbx escalate`
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -22,6 +24,8 @@ use windows_sys::Win32::System::Pipes::{
 };
 
 use aisbx_policy::{EscalationMode, Policy};
+
+use crate::common::pending::PendingViolation;
 
 use super::acl;
 use super::audit::Audit;
@@ -47,6 +51,17 @@ pub struct BrokerHandle {
     pub audit: Arc<Audit>,
     /// C20:运行中提权新落的 ACL 目标,任务结束由 launcher 一并撤销。
     pub granted_acl: Arc<Mutex<Vec<String>>>,
+    /// 宿主已授权的路径(B 契约:只影响本次任务的策略快照,不写回基线策略文件)。
+    /// launcher 轮询它的长度变化,判断「用户是否已同意」,据此扩大白名单并重跑。
+    pub granted_paths: Arc<Mutex<Vec<String>>>,
+    /// 是否存在「需要用户授权」的拒绝。launcher 只为此等待(有上限),
+    /// 其它失败(黑名单、策略拒绝)不等待,直接退出。
+    pub needs_approval: Arc<AtomicBool>,
+    /// 待用户授权的越界列表(供 `aisbx status` 查询;agent 据此问用户)。
+    pub pending: Arc<Mutex<Vec<PendingViolation>>>,
+    /// 当前执行轮次 / 重试次数(供 status 查询)。
+    pub attempt: Arc<AtomicU32>,
+    pub retries: Arc<AtomicU32>,
 }
 
 impl Drop for BrokerHandle {
@@ -66,13 +81,20 @@ pub fn start_server(policy: &Policy, package_sid: &str) -> BrokerHandle {
     let tokens: TokenStore = Arc::new(Mutex::new(HashMap::new()));
     // C20:记录运行中提权实际落 ACL 的路径(可能是父目录),供 stage10 撤销。
     let granted_acl: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // B 契约:宿主授权到达的路径 + 「需要用户授权」标志,供 launcher 等授权并重跑。
+    let granted_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let needs_approval: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    let pending: Arc<Mutex<Vec<PendingViolation>>> = Arc::new(Mutex::new(Vec::new()));
+    let attempt: Arc<AtomicU32> = Arc::new(AtomicU32::new(1));
+    let retries: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
     let sid = package_sid.to_string();
     let stop2 = stop.clone();
     let tokens2 = tokens.clone();
     let acl2 = granted_acl.clone();
+    let needs2 = needs_approval.clone();
     let policy2 = policy.clone();
     std::thread::spawn(move || unsafe {
-        if let Err(e) = server_loop(&policy2, &sid, &stop2, &tokens2, &acl2) {
+        if let Err(e) = server_loop(&policy2, &sid, &stop2, &tokens2, &acl2, &needs2) {
             eprintln!("aisbx: broker 授权管道异常: {e}");
         }
     });
@@ -85,12 +107,36 @@ pub fn start_server(policy: &Policy, package_sid: &str) -> BrokerHandle {
     let tokens3 = tokens.clone();
     let net_state3 = net_state.clone();
     let audit3 = audit.clone();
+    let granted3 = granted_paths.clone();
+    let pending3 = pending.clone();
+    let attempt3 = attempt.clone();
+    let retries3 = retries.clone();
     std::thread::spawn(move || unsafe {
-        if let Err(e) = control_server_loop(&policy3, &stop3, &tokens3, &net_state3, &audit3) {
+        if let Err(e) = control_server_loop(
+            &policy3,
+            &stop3,
+            &tokens3,
+            &net_state3,
+            &audit3,
+            &granted3,
+            &pending3,
+            &attempt3,
+            &retries3,
+        ) {
             eprintln!("aisbx: broker 控制管道异常: {e}");
         }
     });
-    BrokerHandle { stop, net_state, audit, granted_acl }
+    BrokerHandle {
+        stop,
+        net_state,
+        audit,
+        granted_acl,
+        granted_paths,
+        needs_approval,
+        pending,
+        attempt,
+        retries,
+    }
 }
 
 unsafe fn server_loop(
@@ -99,6 +145,7 @@ unsafe fn server_loop(
     stop: &AtomicBool,
     tokens: &TokenStore,
     granted_acl: &Arc<Mutex<Vec<String>>>,
+    needs_approval: &Arc<AtomicBool>,
 ) -> Result<(), String> {
     let pipe_name = format!(r"\\.\pipe\{}", policy.pipe_name());
     let h = create_pipe(&pipe_name, package_sid)?;
@@ -112,7 +159,15 @@ unsafe fn server_loop(
             // 已有客户端在等待(ERROR_PIPE_CONNECTED)时继续,其余错误重试
         }
         if let Some(line) = read_line(h) {
-            let reply = handle_request(policy, &line, &audit, package_sid, tokens, granted_acl);
+            let reply = handle_request(
+                policy,
+                &line,
+                &audit,
+                package_sid,
+                tokens,
+                granted_acl,
+                needs_approval,
+            );
             write_all(h, (reply + "\n").as_bytes());
         }
         DisconnectNamedPipe(h);
@@ -124,12 +179,17 @@ unsafe fn server_loop(
 /// 宿主控制通道:DACL 只含 SYSTEM/Administrators/属主(S-1-3-4)。
 /// 沙箱内进程(AppContainer)即使与宿主同属一个用户,也过不了 AppContainer
 /// 附加检查(SD 未授予 package SID),无法自行签发 token——授权决策权在宿主。
+#[allow(clippy::too_many_arguments)]
 unsafe fn control_server_loop(
     policy: &Policy,
     stop: &AtomicBool,
     tokens: &TokenStore,
     net_state: &Arc<Mutex<NetState>>,
     audit: &Arc<Audit>,
+    granted_paths: &Arc<Mutex<Vec<String>>>,
+    pending: &Arc<Mutex<Vec<PendingViolation>>>,
+    attempt: &Arc<AtomicU32>,
+    retries: &Arc<AtomicU32>,
 ) -> Result<(), String> {
     let pipe_name = format!(r"\\.\pipe\{}-ctl", policy.pipe_name());
     let h = create_pipe_sddl(&pipe_name, "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-3-4)")?;
@@ -137,10 +197,20 @@ unsafe fn control_server_loop(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        if ConnectNamedPipe(h, std::ptr::null_mut()) == 0 {
-        }
+        // ConnectNamedPipe 在「客户端已先连上」时返回 0(ERROR_PIPE_CONNECTED),属正常;
+        // 其余失败情形下 read_line 返回 None,继续循环即可。
+        let _ = ConnectNamedPipe(h, std::ptr::null_mut());
         if let Some(line) = read_line(h) {
-            let reply = handle_control(&line, tokens, net_state, audit);
+            let reply = handle_control(
+                &line,
+                tokens,
+                net_state,
+                audit,
+                granted_paths,
+                pending,
+                attempt,
+                retries,
+            );
             write_all(h, (reply + "\n").as_bytes());
         }
         DisconnectNamedPipe(h);
@@ -175,7 +245,7 @@ unsafe fn apply_low_label(h: HANDLE) -> Result<(), String> {
     use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
     use windows_sys::Win32::Security::{
         GetLengthSid, InitializeSecurityDescriptor, SetSecurityDescriptorSacl,
-        SECURITY_DESCRIPTOR, LABEL_SECURITY_INFORMATION,
+        LABEL_SECURITY_INFORMATION, SECURITY_DESCRIPTOR,
     };
     // 常量值来自 Win32 头文件(SYSTEM_MANDATORY_LABEL_ACE_TYPE=17 / NO_WRITE_UP=1)
     const SYSTEM_MANDATORY_LABEL_ACE_TYPE: u8 = 17;
@@ -204,12 +274,26 @@ unsafe fn apply_low_label(h: HANDLE) -> Result<(), String> {
         super::token::local_free_sid(free);
         return Err("InitializeSecurityDescriptor 失败".into());
     }
-    if SetSecurityDescriptorSacl(&mut sd as *mut _ as *mut std::ffi::c_void, 1, acl as *const _, 0) == 0 {
+    if SetSecurityDescriptorSacl(
+        &mut sd as *mut _ as *mut std::ffi::c_void,
+        1,
+        acl as *const _,
+        0,
+    ) == 0
+    {
         super::token::local_free_sid(free);
         return Err("SetSecurityDescriptorSacl 失败".into());
     }
     // SE_KERNEL_OBJECT = 6
-    let rc = SetSecurityInfo(h, 6, LABEL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null(), acl as *const _);
+    let rc = SetSecurityInfo(
+        h,
+        6,
+        LABEL_SECURITY_INFORMATION,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null(),
+        acl as *const _,
+    );
     super::token::local_free_sid(free);
     if rc != 0 {
         return Err(format!("SetSecurityInfo(label) 失败 win32={rc}"));
@@ -227,13 +311,29 @@ fn enable_security_privilege() -> bool {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     unsafe {
         let mut h: HANDLE = 0;
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut h) == 0 {
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut h,
+        ) == 0
+        {
             return false;
         }
         let mut tp: TOKEN_PRIVILEGES = std::mem::zeroed();
         tp.PrivilegeCount = 1;
-        tp.Privileges[0] = LUID_AND_ATTRIBUTES { Luid: LUID { LowPart: 0, HighPart: 0 }, Attributes: SE_PRIVILEGE_ENABLED };
-        if LookupPrivilegeValueW(std::ptr::null(), SE_SECURITY_NAME, &mut tp.Privileges[0].Luid) == 0 {
+        tp.Privileges[0] = LUID_AND_ATTRIBUTES {
+            Luid: LUID {
+                LowPart: 0,
+                HighPart: 0,
+            },
+            Attributes: SE_PRIVILEGE_ENABLED,
+        };
+        if LookupPrivilegeValueW(
+            std::ptr::null(),
+            SE_SECURITY_NAME,
+            &mut tp.Privileges[0].Luid,
+        ) == 0
+        {
             CloseHandle(h);
             return false;
         }
@@ -287,11 +387,23 @@ unsafe fn read_line(h: HANDLE) -> Option<String> {
     let mut line: Vec<u8> = Vec::new();
     loop {
         let mut n: u32 = 0;
-        if windows_sys::Win32::Storage::FileSystem::ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, &mut n, std::ptr::null_mut()) == 0 || n == 0 {
-            return if line.is_empty() { None } else { Some(String::from_utf8_lossy(&line).into_owned()) };
+        if windows_sys::Win32::Storage::FileSystem::ReadFile(
+            h,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut n,
+            std::ptr::null_mut(),
+        ) == 0
+            || n == 0
+        {
+            return if line.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8_lossy(&line).into_owned())
+            };
         }
         if let Some(pos) = buf[..n as usize].iter().position(|&b| b == b'\n') {
-            line.extend_from_slice(&buf[..pos as usize]);
+            line.extend_from_slice(&buf[..pos]);
             return Some(String::from_utf8_lossy(&line).into_owned());
         }
         line.extend_from_slice(&buf[..n as usize]);
@@ -303,7 +415,13 @@ unsafe fn read_line(h: HANDLE) -> Option<String> {
 
 unsafe fn write_all(h: HANDLE, data: &[u8]) {
     let mut written: u32 = 0;
-    let _ = windows_sys::Win32::Storage::FileSystem::WriteFile(h, data.as_ptr(), data.len() as u32, &mut written, std::ptr::null_mut());
+    let _ = windows_sys::Win32::Storage::FileSystem::WriteFile(
+        h,
+        data.as_ptr(),
+        data.len() as u32,
+        &mut written,
+        std::ptr::null_mut(),
+    );
 }
 
 /// ── 裁决 ──────────────────────────────────────────────────────────────
@@ -335,10 +453,19 @@ fn handle_request(
     package_sid: &str,
     tokens: &TokenStore,
     granted_acl: &Arc<Mutex<Vec<String>>>,
+    needs_approval: &Arc<AtomicBool>,
 ) -> String {
     let reply = match serde_json::from_str::<EscRequest>(line) {
         Ok(req) => match req.op.as_str() {
-            "file" => decide_file(policy, &req, audit, package_sid, tokens, granted_acl),
+            "file" => decide_file(
+                policy,
+                &req,
+                audit,
+                package_sid,
+                tokens,
+                granted_acl,
+                needs_approval,
+            ),
             "net" => decide_net(policy, &req, audit),
             other => json_reply(false, &format!("未知操作 {other}")),
         },
@@ -354,6 +481,7 @@ fn decide_file(
     package_sid: &str,
     tokens: &TokenStore,
     granted_acl: &Arc<Mutex<Vec<String>>>,
+    needs_approval: &Arc<AtomicBool>,
 ) -> String {
     let path = expand_path(&req.path);
     let write = req.access.eq_ignore_ascii_case("write");
@@ -369,7 +497,15 @@ fn decide_file(
 
     // 2) token 快速路径:agent 已在宿主侧取得用户同意并签发,跳过 prompt/auto
     if !req.token.is_empty() {
-        return redeem_token(&req.token, &path, &req.access, package_sid, tokens, audit, granted_acl);
+        return redeem_token(
+            &req.token,
+            &path,
+            &req.access,
+            package_sid,
+            tokens,
+            audit,
+            granted_acl,
+        );
     }
 
     // 3) 按模式裁决
@@ -378,11 +514,24 @@ fn decide_file(
         EscalationMode::Deny => false,
         EscalationMode::Auto => is_prefix_hit(&policy.filesystem.allow_escalation, &path),
         EscalationMode::Prompt => {
-            let ok = prompt_user(&format!(
+            // 无头环境(agent / CI)没法就地问人 → 交给宿主授权通道:
+            // 置 needs_approval,launcher 会等用户同意、并以更宽的策略快照重跑
+            // (B 契约,与 Unix 侧语义一致)。
+            if !is_tty() {
+                needs_approval.store(true, Ordering::Relaxed);
+                audit.log(&serde_json::json!({
+                    "event": "escalation.pending", "op": "file", "path": path,
+                    "reason": "needs-approval", "requested_by": req.requested_by
+                }));
+                return json_reply(false, "需要用户授权后重新执行");
+            }
+
+            prompt_user(&format!(
                 "沙箱请求{}:{} ({})\n同意? [y/N] ",
-                if write { "写入" } else { "读取" }, path, req.access
-            ));
-            ok
+                if write { "写入" } else { "读取" },
+                path,
+                req.access
+            ))
         }
     };
 
@@ -395,7 +544,7 @@ fn decide_file(
     }
 
     // 3) 授权落 ACL(目标文件不存在时授权其父目录继承),后续真实 syscall 直接放行
-    match acl::grant_path(package_sid, &path, write) {
+    match acl::grant_path_precise(package_sid, &path, write) {
         Ok(acl_target) => {
             record_acl(granted_acl, &acl_target);
             audit.log(&serde_json::json!({
@@ -418,7 +567,10 @@ fn decide_net(policy: &Policy, req: &EscRequest, audit: &Audit) -> String {
         "event": "escalation.deny", "op": "net",
         "host": req.host, "ip": req.ip, "port": req.port, "reason": "network-escalation-unsupported"
     }));
-    json_reply(false, "外网默认拒绝;按主机放行需 WFP 规则(见设计文档路线图),可改策略 network.internet 或改用代理")
+    json_reply(
+        false,
+        "外网默认拒绝;按主机放行需 WFP 规则(见设计文档路线图),可改策略 network.internet 或改用代理",
+    )
 }
 
 /// ── 宿主控制通道:token 签发 ──────────────────────────────────────────
@@ -438,16 +590,41 @@ struct IssueRequest {
     port: Option<u16>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_control(
     line: &str,
     tokens: &TokenStore,
     net_state: &Arc<Mutex<NetState>>,
     audit: &Arc<Audit>,
+    granted_paths: &Arc<Mutex<Vec<String>>>,
+    pending: &Arc<Mutex<Vec<PendingViolation>>>,
+    attempt: &Arc<AtomicU32>,
+    retries: &Arc<AtomicU32>,
 ) -> String {
     let req = match serde_json::from_str::<IssueRequest>(line) {
         Ok(r) => r,
         Err(e) => return json_reply(false, &format!("请求解析失败: {e}")),
     };
+
+    // 宿主侧查询状态:给出**具体**待授权路径(agent 据此问用户),而不是只给数量。
+    // 字段与 Unix 侧 status 保持一致,agent 一套代码吃两个平台。
+    if req.op == "status" {
+        let pend = pending.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let gp = granted_paths
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        return serde_json::json!({
+            "backend": "windows",
+            "attempt": attempt.load(Ordering::Relaxed),
+            "retries": retries.load(Ordering::Relaxed),
+            "needs_approval": !pend.is_empty(),
+            "pending": pend,
+            "granted_paths": gp,
+            "granted_nets": Vec::<String>::new(),
+        })
+        .to_string();
+    }
 
     // P0:放行代理真实观察过的网络目标。运行中即时生效,不写回策略文件、不需重跑。
     if req.op == "net-issue" {
@@ -496,9 +673,22 @@ fn handle_control(
     store.retain(|_, t| t.expires_at > Instant::now()); // 顺手清过期
     store.insert(
         token.clone(),
-        IssuedToken { path: path.clone(), access: req.access.clone(), expires_at: Instant::now() + Duration::from_secs(ttl) },
+        IssuedToken {
+            path: path.clone(),
+            access: req.access.clone(),
+            expires_at: Instant::now() + Duration::from_secs(ttl),
+        },
     );
     drop(store);
+    // B 契约:宿主已授权 → 记入本次任务的授权清单。launcher 轮询它的长度变化,
+    // 判断「用户是否已同意」,据此把该路径并入白名单(落 ACL)并重跑。
+    // 授权本身仍由 token 承载(一次性、可过期),这里只记「已同意的路径」。
+    {
+        let mut g = granted_paths.lock().unwrap_or_else(|p| p.into_inner());
+        if !g.iter().any(|x| x.eq_ignore_ascii_case(&path)) {
+            g.push(path.clone());
+        }
+    }
     audit.log(&serde_json::json!({
         "event": "token.issued", "path": path, "access": req.access, "ttl_seconds": ttl
     }));
@@ -536,11 +726,14 @@ fn redeem_token(
         audit.log(&serde_json::json!({
             "event": "token.reject", "path": path, "access": access
         }));
-        return json_reply(false, "授权 token 无效、已过期、已消费或与路径/访问级别不匹配");
+        return json_reply(
+            false,
+            "授权 token 无效、已过期、已消费或与路径/访问级别不匹配",
+        );
     };
     // 按 token 覆盖的具体路径落 ACL;文件尚不存在时授权父目录继承
     let write = t.access.eq_ignore_ascii_case("write");
-    match acl::grant_path(package_sid, path, write) {
+    match acl::grant_path_precise(package_sid, path, write) {
         Ok(acl_target) => {
             record_acl(granted_acl, &acl_target);
             audit.log(&serde_json::json!({
@@ -587,9 +780,17 @@ fn random_token() -> String {
 }
 
 fn is_prefix_hit(list: &[String], path: &str) -> bool {
-    let p = path.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    let p = path
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
     list.iter()
-        .map(|x| expand_path(x).replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase())
+        .map(|x| {
+            expand_path(x)
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_ascii_lowercase()
+        })
         .any(|base| p == base || p.starts_with(&format!("{base}\\")))
 }
 
@@ -620,7 +821,12 @@ fn json_reply(granted: bool, reason: &str) -> String {
 
 /// ── 客户端(沙箱内执行 `aisbx escalate`) ─────────────────────────────
 
-pub fn escalate_client(policy: &Policy, path: &str, access: &str, token: &str) -> Result<i32, String> {
+pub fn escalate_client(
+    policy: &Policy,
+    path: &str,
+    access: &str,
+    token: &str,
+) -> Result<i32, String> {
     let name = format!(r"\\.\pipe\{}", policy.pipe_name());
     let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -646,16 +852,27 @@ pub fn escalate_client(policy: &Policy, path: &str, access: &str, token: &str) -
         write_all(h, format!("{req}\n").as_bytes());
         let reply = read_line(h).unwrap_or_default();
         CloseHandle(h);
-        let v: serde_json::Value = serde_json::from_str(&reply)
-            .map_err(|e| format!("应答解析失败: {e}: {reply}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&reply).map_err(|e| format!("应答解析失败: {e}: {reply}"))?;
         println!("{reply}");
-        Ok(if v.get("granted").and_then(|g| g.as_bool()).unwrap_or(false) { 0 } else { 1 })
+        Ok(
+            if v.get("granted").and_then(|g| g.as_bool()).unwrap_or(false) {
+                0
+            } else {
+                1
+            },
+        )
     }
 }
 
 /// 宿主侧 `aisbx authorize`:向运行中 broker 的控制通道签发一次性授权 token。
 /// 这是 agent 框架在无头环境下把「用户同意」传入沙箱的唯一通道。
-pub fn authorize_client(policy: &Policy, path: &str, access: &str, ttl: u64) -> Result<i32, String> {
+pub fn authorize_client(
+    policy: &Policy,
+    path: &str,
+    access: &str,
+    ttl: u64,
+) -> Result<i32, String> {
     let name = format!(r"\\.\pipe\{}-ctl", policy.pipe_name());
     let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -669,15 +886,54 @@ pub fn authorize_client(policy: &Policy, path: &str, access: &str, ttl: u64) -> 
             0,
         );
         if h == INVALID_HANDLE_VALUE {
-            return Err(format!("无法连接控制管道 {name}(任务未运行或不在宿主侧执行)"));
+            return Err(format!(
+                "无法连接控制管道 {name}(任务未运行或不在宿主侧执行)"
+            ));
         }
         let req = serde_json::json!({ "op": "issue", "path": path, "access": access, "ttl_seconds": ttl });
         write_all(h, format!("{req}\n").as_bytes());
         let reply = read_line(h).unwrap_or_default();
         CloseHandle(h);
-        let v: serde_json::Value = serde_json::from_str(&reply)
-            .map_err(|e| format!("应答解析失败: {e}: {reply}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&reply).map_err(|e| format!("应答解析失败: {e}: {reply}"))?;
         println!("{reply}");
-        Ok(if v.get("granted").and_then(|g| g.as_bool()).unwrap_or(false) { 0 } else { 1 })
+        Ok(
+            if v.get("granted").and_then(|g| g.as_bool()).unwrap_or(false) {
+                0
+            } else {
+                1
+            },
+        )
+    }
+}
+
+/// 宿主侧 `aisbx status`:查询当前任务的待授权项与进度。
+///
+/// 与 Unix 侧 `aisbx status` 返回**同一套字段**,agent 一套代码吃两个平台。
+pub fn status_client(policy: &Policy) -> Result<String, String> {
+    let name = format!(r"\\.\pipe\{}-ctl", policy.pipe_name());
+    let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let h = CreateFileW(
+            name_w.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_NONE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            0,
+        );
+        if h == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "无法连接控制管道 {name}(任务未运行或不在宿主侧执行)"
+            ));
+        }
+        write_all(h, b"{\"op\":\"status\"}\n");
+        let reply = read_line(h).unwrap_or_default();
+        CloseHandle(h);
+        if reply.trim().is_empty() {
+            return Err("broker 无应答".into());
+        }
+        Ok(reply)
     }
 }

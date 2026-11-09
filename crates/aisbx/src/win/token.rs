@@ -3,14 +3,14 @@
 //! 走 NtCreateLowBoxToken 而非 CreateAppContainerProfile:
 //! 不写注册表、零残留、亚毫秒级创建,令牌随任务一次性生成与销毁(会话级资产)。
 
+use windows_sys::core::PWSTR;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, HANDLE, INVALID_HANDLE_VALUE, LocalFree, NTSTATUS, PSID,
+    CloseHandle, LocalFree, HANDLE, INVALID_HANDLE_VALUE, NTSTATUS, PSID,
 };
 use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW};
-use windows_sys::core::PWSTR;
 use windows_sys::Win32::Security::Isolation::DeriveAppContainerSidFromAppContainerName;
 use windows_sys::Win32::Security::{
-    DuplicateTokenEx, FreeSid, SetTokenInformation, SID_AND_ATTRIBUTES, TokenIntegrityLevel,
+    DuplicateTokenEx, FreeSid, SetTokenInformation, TokenIntegrityLevel, SID_AND_ATTRIBUTES,
     TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -48,7 +48,9 @@ pub fn generate_package_sid(task: &str) -> Result<String, String> {
         let mut sid: PSID = std::ptr::null_mut();
         let hr = DeriveAppContainerSidFromAppContainerName(w.as_ptr(), &mut sid);
         if hr < 0 || sid.is_null() {
-            return Err(format!("DeriveAppContainerSidFromAppContainerName 失败 HRESULT=0x{hr:08X}"));
+            return Err(format!(
+                "DeriveAppContainerSidFromAppContainerName 失败 HRESULT=0x{hr:08X}"
+            ));
         }
         let mut raw: PWSTR = std::ptr::null_mut();
         if ConvertSidToStringSidW(sid, &mut raw) == 0 || raw.is_null() {
@@ -67,7 +69,13 @@ pub fn generate_package_sid(task: &str) -> Result<String, String> {
 fn sanitize_name(t: &str) -> String {
     let s: String = t
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     s.chars().take(48).collect()
 }
@@ -79,7 +87,7 @@ pub unsafe fn sid_from_string(s: &str) -> Result<(PSID, *mut std::ffi::c_void), 
     if ConvertStringSidToSidW(w.as_mut_ptr(), &mut sid) == 0 || sid.is_null() {
         return Err(format!("ConvertStringSidToSidW 失败: {s}"));
     }
-    Ok((sid, sid as *mut std::ffi::c_void))
+    Ok((sid, sid))
 }
 
 pub unsafe fn local_free_sid(p: *mut std::ffi::c_void) {
@@ -125,7 +133,10 @@ pub unsafe fn create_lowbox_token(
     for cs in capability_sids {
         let (s, f) = sid_from_string(cs)?;
         frees.push(f);
-        caps.push(SID_AND_ATTRIBUTES { Sid: s, Attributes: 0 });
+        caps.push(SID_AND_ATTRIBUTES {
+            Sid: s,
+            Attributes: 0,
+        });
     }
 
     let mut h_lowbox: HANDLE = 0;
@@ -136,7 +147,11 @@ pub unsafe fn create_lowbox_token(
         std::ptr::null_mut(),
         pkg_sid,
         caps.len() as u32,
-        if caps.is_empty() { std::ptr::null() } else { caps.as_ptr() },
+        if caps.is_empty() {
+            std::ptr::null()
+        } else {
+            caps.as_ptr()
+        },
         0,
         std::ptr::null_mut(),
     );
@@ -160,7 +175,12 @@ unsafe fn set_low_integrity(token: HANDLE) -> Result<(), String> {
         label: SID_AND_ATTRIBUTES,
     }
     let (sid, free) = sid_from_string("S-1-16-4096")?;
-    let buf = TokenMandatoryLabel { label: SID_AND_ATTRIBUTES { Sid: sid, Attributes: 0 } };
+    let buf = TokenMandatoryLabel {
+        label: SID_AND_ATTRIBUTES {
+            Sid: sid,
+            Attributes: 0,
+        },
+    };
     let ok = SetTokenInformation(
         token,
         TokenIntegrityLevel,

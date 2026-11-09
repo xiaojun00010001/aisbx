@@ -49,12 +49,26 @@ fn handle(stream: UnixStream, state: &Arc<Mutex<State>>) -> Result<(), String> {
     super::relay::read_line_unbuffered(&stream, &mut req_line)
         .map_err(|e| format!("读取代理请求失败: {e}"))?;
     let req: Value = serde_json::from_str(req_line.trim()).unwrap_or_default();
-    let host = req.get("host").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let host = req
+        .get("host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let port = req.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-    let ip = req.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let command_id = req.get("command_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let ip = req
+        .get("ip")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let command_id = req
+        .get("command_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
-    let mut out = stream.try_clone().map_err(|e| format!("clone UDS 失败: {e}"))?;
+    let mut out = stream
+        .try_clone()
+        .map_err(|e| format!("clone UDS 失败: {e}"))?;
 
     if host.is_empty() || port == 0 {
         let _ = writeln!(out, "{}", json!({"allow": false, "reason": "empty target"}));
@@ -63,14 +77,22 @@ fn handle(stream: UnixStream, state: &Arc<Mutex<State>>) -> Result<(), String> {
     {
         let s = state.lock().unwrap_or_else(|p| p.into_inner());
         if !command_id.is_empty() && command_id != s.command_id {
-            let _ = writeln!(out, "{}", json!({"allow": false, "reason": "command_id mismatch"}));
+            let _ = writeln!(
+                out,
+                "{}",
+                json!({"allow": false, "reason": "command_id mismatch"})
+            );
             return Ok(());
         }
     }
 
     // 防 SSRF:代理不能成为打通宿主本机服务 / 云元数据的通道。
     if let Some(addr) = forbidden_target(&host, port) {
-        let _ = writeln!(out, "{}", json!({"allow": false, "reason": format!("forbidden address {addr}")}));
+        let _ = writeln!(
+            out,
+            "{}",
+            json!({"allow": false, "reason": format!("forbidden address {addr}")})
+        );
         return Ok(());
     }
 
@@ -107,11 +129,19 @@ fn handle(stream: UnixStream, state: &Arc<Mutex<State>>) -> Result<(), String> {
     };
 
     if !allowed {
-        let _ = writeln!(out, "{}", json!({"allow": false, "reason": "user approval not granted"}));
+        let _ = writeln!(
+            out,
+            "{}",
+            json!({"allow": false, "reason": "user approval not granted"})
+        );
         return Ok(());
     }
-    writeln!(out, "{}", json!({"allow": true, "host": host, "port": port}))
-        .map_err(|e| format!("写代理应答失败: {e}"))?;
+    writeln!(
+        out,
+        "{}",
+        json!({"allow": true, "host": host, "port": port})
+    )
+    .map_err(|e| format!("写代理应答失败: {e}"))?;
 
     // 宿主代连(沙箱内 netns / Seatbelt 均无外网),然后 UDS <-> TCP 双向搬运。
     let mut upstream = match TcpStream::connect((host.as_str(), port)) {
@@ -128,8 +158,12 @@ fn handle(stream: UnixStream, state: &Arc<Mutex<State>>) -> Result<(), String> {
             return Ok(());
         }
     };
-    let mut to_up = stream.try_clone().map_err(|e| format!("clone UDS 失败: {e}"))?;
-    let mut from_up = upstream.try_clone().map_err(|e| format!("clone TCP 失败: {e}"))?;
+    let mut to_up = stream
+        .try_clone()
+        .map_err(|e| format!("clone UDS 失败: {e}"))?;
+    let mut from_up = upstream
+        .try_clone()
+        .map_err(|e| format!("clone TCP 失败: {e}"))?;
     let t = std::thread::spawn(move || {
         let _ = std::io::copy(&mut to_up, &mut upstream);
         let _ = upstream.shutdown(std::net::Shutdown::Write);

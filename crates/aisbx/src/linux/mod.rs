@@ -5,6 +5,13 @@ pub mod helper;
 
 use aisbx_policy::Policy;
 
-pub fn run_linux(policy: &Policy, policy_file: &str, cmd: &[String], json: bool) -> Result<i32, String> {
-    crate::unix::run::run_loop(policy, policy_file, cmd, json, |p, c, ctx| bwrap::argv(p, c, ctx))
+pub fn run_linux(
+    policy: &Policy,
+    policy_file: &str,
+    cmd: &[String],
+    json: bool,
+) -> Result<i32, String> {
+    crate::unix::run::run_loop(policy, policy_file, cmd, json, |p, c, ctx| {
+        bwrap::argv(p, c, ctx)
+    })
 }

@@ -10,7 +10,9 @@ pub struct Audit {
 
 impl Audit {
     pub fn new(path: Option<&Path>) -> Audit {
-        Audit { path: path.map(|p| p.to_path_buf()) }
+        Audit {
+            path: path.map(|p| p.to_path_buf()),
+        }
     }
 
     pub fn log(&self, event: &serde_json::Value) {
