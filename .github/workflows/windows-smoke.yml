@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # contents: write —— 回写本次运行结果(与 cross-platform.yml 同理)
+  contents: write
   issues: write
 
 jobs:
@@ -33,6 +34,30 @@ jobs:
             Get-Content smoke.log | Select-Object -Last 20 | ForEach-Object { Write-Host "::error::$_" }
           }
           exit $code
+
+      - name: Publish run result to repo
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          New-Item -ItemType Directory -Force -Path ci/runs | Out-Null
+          $raw = ""
+          foreach ($f in @("smoke.log")) {
+            if (Test-Path $f) { $raw += (Get-Content $f -Raw) }
+          }
+          if ($raw.Length -gt 40000) { $raw = $raw.Substring($raw.Length - 40000) }
+          $md = "# CI run $env:GITHUB_RUN_ID (windows)`n`n- commit: $env:GITHUB_SHA`n- job status: $env:JOB_STATUS`n`n" +
+                "```text`n" + $raw + "`n```"
+          Set-Content "ci/runs/$env:GITHUB_RUN_ID-windows.md" -Value $md -Encoding utf8
+          Copy-Item "ci/runs/$env:GITHUB_RUN_ID-windows.md" "ci/last-run.md" -Force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci
+          git commit -q -m "ci: record run $env:GITHUB_RUN_ID windows [skip ci]"
+          git push
+          if ($LASTEXITCODE -ne 0) { Write-Host "::notice::结果回写失败(分支可能受保护),请看 run 日志" }
 
       # 失败时把完整日志落到 Issue:公开仓库可经 REST API 无鉴权读取,便于远端诊断
       - name: Publish failure log

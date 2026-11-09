@@ -11,7 +11,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # contents: write —— 用于把本次运行的结果(冒烟日志 / clippy 输出)回写仓库,
+  # 这样「CI 结果」不依赖 GitHub API 配额也能读到(git fetch 即可)。
+  contents: write
   issues: write
 
 jobs:
@@ -35,7 +37,9 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee clippy.log
 
       # ⚠️ 此前只跑 `cargo test -p aisbx-policy`,aisbx crate 自身的单测从未进 CI。
       # 用 --workspace 覆盖全部 crate(含 doctest)。
@@ -48,9 +52,62 @@ jobs:
       - name: Capability report
         run: cargo run --quiet --bin aisbx -- capabilities
 
+      - name: Publish run result to repo
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci/runs
+          out="ci/runs/${{ github.run_id }}-windows-check.md"
+          {
+            echo "# CI run ${{ github.run_id }} (windows-check)"
+            echo
+            echo "- commit: ${{ github.sha }}"
+            echo "- job status: ${{ job.status }}"
+            echo
+            echo '```text'
+            cat clippy.log 2>/dev/null | tail -n 200 || true
+            echo '```'
+          } > "$out"
+          cp "$out" ci/last-run.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci
+          git commit -q -m "ci: record run ${{ github.run_id }} windows-check [skip ci]" || exit 0
+          git push || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志"
+
       - name: Smoke (B contract)
         shell: bash
         run: bash scripts/smoke-unix.sh 2>&1 | tee smoke.log
+
+      - name: Publish run result to repo
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          mkdir -p ci/runs
+          out="ci/runs/${{ github.run_id }}-${{ matrix.os }}.md"
+          {
+            echo "# CI run ${{ github.run_id }} (${{ matrix.os }})"
+            echo
+            echo "- commit: ${{ github.sha }}"
+            echo "- workflow: ${{ github.workflow }}"
+            echo "- job status: ${{ job.status }}"
+            echo
+            echo '```text'
+            cat smoke.log clippy.log 2>/dev/null | tail -n 400 || true
+            echo '```'
+          } > "$out"
+          cp "$out" ci/last-run.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ci
+          git commit -q -m "ci: record run ${{ github.run_id }} ${{ matrix.os }} [skip ci]" || exit 0
+          git push || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志"
 
       - name: Publish failure log
         if: failure()
@@ -84,7 +141,10 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
       - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee clippy.log
       - name: Unit tests (all crates)
         run: cargo test --workspace
       - name: Build (Windows backend unchanged)
