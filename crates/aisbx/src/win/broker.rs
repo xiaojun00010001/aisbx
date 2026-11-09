@@ -545,8 +545,8 @@ fn decide_file(
 
     // 3) 授权落 ACL(目标文件不存在时授权其父目录继承),后续真实 syscall 直接放行
     match acl::grant_path_precise(package_sid, &path, write) {
-        Ok(acl_target) => {
-            record_acl(granted_acl, &acl_target);
+        Ok((acl_target, is_placeholder)) => {
+            record_acl(granted_acl, &acl_target, is_placeholder);
             audit.log(&serde_json::json!({
                 "event": "escalation.grant", "op": "file", "path": path,
                 "acl_target": acl_target,
@@ -734,8 +734,8 @@ fn redeem_token(
     // 按 token 覆盖的具体路径落 ACL;文件尚不存在时授权父目录继承
     let write = t.access.eq_ignore_ascii_case("write");
     match acl::grant_path_precise(package_sid, path, write) {
-        Ok(acl_target) => {
-            record_acl(granted_acl, &acl_target);
+        Ok((acl_target, is_placeholder)) => {
+            record_acl(granted_acl, &acl_target, is_placeholder);
             audit.log(&serde_json::json!({
                 "event": "token.redeemed", "path": path, "acl_target": acl_target,
                 "access": access
@@ -747,10 +747,16 @@ fn redeem_token(
 }
 
 /// 登记运行中提权落下的 ACL 目标,供任务结束统一撤销(C20)。
-fn record_acl(list: &Arc<Mutex<Vec<String>>>, target: &str) {
+fn record_acl(list: &Arc<Mutex<Vec<String>>>, target: &str, is_placeholder: bool) {
     let mut g = list.lock().unwrap_or_else(|p| p.into_inner());
-    if !g.iter().any(|p| p.eq_ignore_ascii_case(target)) {
-        g.push(target.to_string());
+    // 占位文件加前缀标记:任务结束撤销 ACL 时据此把空占位文件一并回收。
+    let entry = if is_placeholder {
+        format!("{}{}", acl::PLACEHOLDER_MARK, target)
+    } else {
+        target.to_string()
+    };
+    if !g.iter().any(|p| p.eq_ignore_ascii_case(&entry)) {
+        g.push(entry);
     }
 }
 

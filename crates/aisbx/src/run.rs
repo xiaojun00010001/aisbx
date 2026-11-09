@@ -287,7 +287,18 @@ pub fn run_windows(
     // C20:撤销运行中提权新落的 ACE(此前只撤启动白名单,会留下持久 ACL 残余)。
     if let Ok(list) = broker.granted_acl.lock() {
         for p in list.iter() {
-            acl::revoke(&package_sid, p);
+            // 占位文件:撤销 ACE 后回收**仍是空文件**的那个——
+            // 沙箱已写入内容的,那是用户要的结果,必须留下。
+            match p.strip_prefix(acl::PLACEHOLDER_MARK) {
+                Some(ph) => {
+                    acl::revoke(&package_sid, ph);
+                    let empty = std::fs::metadata(ph).map(|m| m.len() == 0).unwrap_or(false);
+                    if empty {
+                        let _ = std::fs::remove_file(ph);
+                    }
+                }
+                None => acl::revoke(&package_sid, p),
+            }
         }
     }
     for p in &granted_paths {
