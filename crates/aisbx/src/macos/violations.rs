@@ -28,8 +28,8 @@
 //!      根本来不及看到那个 fork 出来的短命子进程。
 //!    - **可行判据是进程组**:fork 继承 pgid,故只要违规进程**还活着**,
 //!      就能用 pid→pgid 反查判定它属于本次沙箱 —— 与层级深度无关。
-//!    因此归属分两级:①已知 PID 集合(入口 + kqueue 收集的 fork 后代 + 登记 PID)
-//!    ②pid→pgid 反查(违规进程仍存活时)。两条都不成立 → 归入 unattributed。
+//!      因此归属分两级:①已知 PID 集合(入口 + kqueue 收集的 fork 后代 + 登记 PID)
+//!      ②pid→pgid 反查(违规进程仍存活时)。两条都不成立 → 归入 unattributed。
 //!
 //! 3. **落盘延迟 ≈1456ms**(命令 12ms 结束 → 1467ms 后日志才可见)。
 //!    原先 3 次 × 800ms 的重试窗口(共 1.6s)刚好卡在边缘,是真实的漏采源。
@@ -53,7 +53,7 @@
 //!
 //! 下一步(P2/P3):macOS 用 Endpoint Security `ES_EVENT_TYPE_AUTH_OPEN`(需 entitlement
 //! + 公证 + 系统扩展批准),Linux 用 fanotify `FAN_OPEN_PERM`,Windows 用 minifilter
-//! `IRP_MJ_CREATE` 前置回调——三者都能同步裁决并直接给出精确路径,见 docs/08。
+//!   `IRP_MJ_CREATE` 前置回调——三者都能同步裁决并直接给出精确路径,见 docs/08。
 
 use std::process::Command;
 use std::time::Duration;
@@ -100,7 +100,7 @@ pub fn now_timestamp() -> Option<String> {
 /// - 主判据 `owned`:入口 + kqueue 收集到的 fork 后代 + 登记 PID;
 /// - 兜底 `pgid` 反查:违规进程**还活着**时,用 pid→pgid 反查它是否属于本次
 ///   进程组——fork 继承 pgid,故这一条与层级深度无关。
-/// 两条都不成立 → `attributed=false`,路径仍然精确,但只是候选。
+///   两条都不成立 → `attributed=false`,路径仍然精确,但只是候选。
 pub fn collect(
     pgid: u32,
     tree: &[u32],
@@ -178,7 +178,7 @@ fn query(owned: &[u32], pgid: u32, since: Option<&str>) -> (Vec<Captured>, Vec<C
 /// - write:一律可能是我们的(保持宽松,宁可多报);
 /// - read:只有命中我们 profile 里**显式 deny 的凭据目录**才可能是我们的
 ///   (.ssh/.aws/.gnupg/.kube/.docker),其余(如 Chrome 读自己的 so)一律丢弃。
-/// 这样能把同机噪音从审计里滤掉大半。
+///   这样能把同机噪音从审计里滤掉大半。
 fn is_relevant_unattributed(access: &str, path: &str) -> bool {
     if access == "write" {
         return true;

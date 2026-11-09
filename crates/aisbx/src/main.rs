@@ -63,7 +63,7 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
         Some("__unix_entry") => {
             #[cfg(unix)]
             {
-                return unix::relay::entry(rest_after(args, 1));
+                unix::relay::entry(rest_after(args, 1))
             }
             #[cfg(not(unix))]
             {
@@ -73,7 +73,7 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
         Some("__relay_only") => {
             #[cfg(unix)]
             {
-                return unix::relay::relay_only(rest_after(args, 1));
+                unix::relay::relay_only(rest_after(args, 1))
             }
             #[cfg(not(unix))]
             {
