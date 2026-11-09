@@ -34,12 +34,24 @@ impl TokenStore {
     }
 
     /// 校验并消费。重放、过期、路径不匹配、access 不满足一律失败。
-    pub fn redeem(&mut self, token: &str, path: &str, access: &str) -> Result<IssuedToken, String> {
+    ///
+    /// `command_id` 校验是纵深防御:token 必须属于**当前这条命令**。
+    /// 即便 token 从别处泄漏到手,也无法在另一条命令上消费。
+    pub fn redeem(
+        &mut self,
+        token: &str,
+        path: &str,
+        access: &str,
+        command_id: &str,
+    ) -> Result<IssuedToken, String> {
         self.map.retain(|_, t| t.expires_at > Instant::now());
         let hit = self.map.get(token).cloned();
         let Some(t) = hit else {
             return Err("token 无效、已过期或已消费".into());
         };
+        if t.command_id != command_id {
+            return Err("token 不属于当前命令".into());
+        }
         if !crate::core::decision::is_prefix_hit(std::slice::from_ref(&t.path), path) {
             return Err("token 与请求路径不匹配".into());
         }

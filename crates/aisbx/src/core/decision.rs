@@ -11,15 +11,24 @@ use crate::common::expand_path;
 pub fn real_path(p: &str) -> String {
     let expanded = expand_path(p);
     if let Ok(c) = std::fs::canonicalize(&expanded) {
-        return c.to_string_lossy().to_string();
+        return strip_win_prefix(&c.to_string_lossy());
     }
     let path = std::path::Path::new(&expanded);
     if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
         if let Ok(c) = std::fs::canonicalize(parent) {
-            return c.join(name).to_string_lossy().to_string();
+            return strip_win_prefix(&c.join(name).to_string_lossy());
         }
     }
     expanded
+}
+
+/// 剥掉 Windows `canonicalize` 加上的 `\\?\` 长路径前缀。
+///
+/// 前缀路径对 Windows API 仍然可用,但对**用户与 agent 不友好**:审计里出现
+/// `\\?\C:\Users\runneradmin\...` 时,没人能拿它去和策略里的路径比对。
+/// 故审计与授权一律用「去掉前缀」的可读形态。
+fn strip_win_prefix(s: &str) -> String {
+    s.strip_prefix(r"\\?\").unwrap_or(s).to_string()
 }
 
 /// 仅用于比较:统一分隔符与大小写。

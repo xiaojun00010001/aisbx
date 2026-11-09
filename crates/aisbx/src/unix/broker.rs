@@ -202,7 +202,10 @@ fn decide_file(s: &mut State, req: &EscRequest) -> String {
 
     // 2) token 快速路径:一次性消费,重放必拒
     if !req.token.is_empty() {
-        return match s.tokens.redeem(&req.token, &path, &req.access) {
+        return match s
+            .tokens
+            .redeem(&req.token, &path, &req.access, &s.command_id)
+        {
             Ok(t) => {
                 s.widen(&t.path);
                 s.audit.log(&json!({
