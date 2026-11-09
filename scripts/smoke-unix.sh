@@ -212,6 +212,130 @@ PY
   assert "T7d 授权后文件真实落盘" test -f "$OUT/t7.txt"
   assert "T7e retry 事件已落审计" grep -q '"event":"retry"' "$A7"
   cat "$ROOT/t7.out" >> "$LOG"
+
+  # T7f/T7g:回归——内核上报的是【真正执行违规的那个进程】的 PID。
+  # 实测(2026-11-08):入口 PID=64904,而日志里是 64905=入口 fork 出的子 shell。
+  # 旧实现按「入口 PID + 登记 PID」归属,必然漏掉所有 fork 出来的子孙进程。
+  # 现改为:进程存活期间按 pgid 累积组成员 → 覆盖整棵进程树。
+  P7F="$ROOT/p7f.json"; A7F="$ROOT/p7f.audit.jsonl"; TASK7F="smoke7f-$$"
+  python3 - "$P7F" "$WS" "$A7F" "$TASK7F" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PY
+  "$BIN" run -p "$P7F" --json -- /bin/sh -c "echo \"SANDBOX_PARENT_PID=\$\$\"; (echo hi > $OUT/t7f.txt)" >"$ROOT/t7f.out" 2>&1 &
+  T7F_PID=$!
+  # 等待 violation 事件(不能只等路径:`spawned` 事件的命令串里也含该路径,
+  # 用路径做条件会立刻 break,断言在采集完成前就跑了)
+  for _ in $(seq 1 150); do
+    grep 't7f\.txt' "$A7F" 2>/dev/null | grep -q '"event":"violation' && break
+    sleep 0.2
+  done
+  # T7f:短命深层进程 → 【无法归属】。实测违规进程可比入口深 3 层
+  # (入口 84007 / 内核上报 84011),而 kqueue 的 fork 事件只在父子间投递,
+  # 短命进程退出后又无法反查进程组,归属不可判定。
+  # 关键安全约束:未能归属 ≠ 是我们的越界 —— 同机其它应用的违规(实测能捞到
+  # Chrome、wifip2pd)会落进同一个日志流。所以这类条目只能进审计,
+  # 绝不能进 violations 列表、绝不能驱动授权(否则等于让用户授权无关路径,
+  # 还能被用来伪造「真实拒绝」骗过 token 签发)。
+  # 注意:serde_json 的 Map 是 BTreeMap,输出按【字母序】(access, attributed,
+  # command_id, event, path, pid, precision, reason, source)——所以不能假设
+  # "event" 在 "path" 之前,匹配一律用管道 grep,不依赖字段顺序。
+  if grep 't7f\.txt' "$A7F" 2>/dev/null | grep -q '"event":"violation.captured"'; then
+    bad "T7f 内核日志未归属的条目不得作为越界上报(会误认同机其它进程的违规)"
+  else
+    pass "T7f 内核日志未归属的条目不作为越界上报(仅审计)"
+  fi
+  assert "T7g 未归属条目仍留审计记录(路径可见)" bash -c "grep 't7f\.txt' '$A7F' | grep -q '\"event\":\"violation.unattributed\"'"
+  # T7l:只有「内核日志未归属」这一条来源时,不得用于申请授权。
+  # ⚠️ 不能沿用 T7f 的载荷:`sh -c 'echo hi > path'` 的 stderr 带路径 →
+  # 会被 L1 以 attributed=true 采到 → 归属确定 → 授权本就合法(这正是 L1 的价值)。
+  # 这里显式关闭 stderr 采集(violation_capture=false):L2 照常采(macOS 固有),
+  # L1 不采 → 只剩「未归属」这一条来源 → authorize 必须被拒。
+  # 该用例与平台无关:Linux 无 L2,同样什么都没有 → 同样必须被拒。
+  P7L="$ROOT/p7l.json"; A7L="$ROOT/p7l.audit.jsonl"; TASK7L="smoke7l-$$"
+  python3 - "$P7L" "$WS" "$A7L" "$TASK7L" <<'PYL'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": False},
+}, open(policy, "w"), indent=2)
+PYL
+  "$BIN" run -p "$P7L" --json -- /bin/sh -c "echo hi > $OUT/t7l.txt" >"$ROOT/t7l.out" 2>&1 &
+  T7L_PID=$!
+  for _ in $(seq 1 150); do
+    grep 't7l\.txt' "$A7L" 2>/dev/null | grep -q '"event":"violation' && break
+    sleep 0.2
+  done
+  if "$BIN" authorize -p "$P7L" --path "$OUT/t7l.txt" --access write >>"$LOG" 2>&1; then
+    bad "T7l 未归属条目不得用于申请授权"
+  else
+    pass "T7l 未归属条目不得用于申请授权"
+  fi
+  wait "$T7L_PID"
+  cat "$ROOT/t7l.out" >> "$LOG"
+  wait "$T7F_PID"
+  cat "$ROOT/t7f.out" >> "$LOG"
+
+  # T7i:违规进程【仍存活】时,用 pid→pgid 反查精确归属(与层级深度无关,
+  # 因为 fork 继承进程组)。这是深层次归属的主力判据。
+  P7H="$ROOT/p7h.json"; A7H="$ROOT/p7h.audit.jsonl"; TASK7H="smoke7h-$$"
+  python3 - "$P7H" "$WS" "$A7H" "$TASK7H" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PY
+  # 用两层子 shell,让违规进程深到 kqueue 覆盖不到(它只投递父子事件),
+  # 从而真正验证「pid→pgid 反查」这条与层级深度无关的兜底判据。
+  "$BIN" run -p "$P7H" --json -- /bin/sh -c "((echo hi > $OUT/t7h.txt; sleep 15) &) & sleep 6" >"$ROOT/t7h.out" 2>&1 &
+  T7H_PID=$!
+  for _ in $(seq 1 200); do
+    grep 't7h\.txt' "$A7H" 2>/dev/null | grep -q '"event":"violation' && break
+    sleep 0.2
+  done
+  T7H_ATTR=$(python3 -c 'import json,sys
+for ln in open(sys.argv[1]):
+    try: d=json.loads(ln)
+    except Exception: continue
+    if d.get("event")=="violation.captured" and "t7h.txt" in d.get("path",""):
+        print(json.dumps(d.get("attributed"))); break' "$A7H" 2>/dev/null)
+  if [[ "$T7H_ATTR" == "true" ]]; then
+    pass "T7i 存活的深层进程按进程组精确归属(attributed=true)"
+  else
+    bad "T7i 存活的深层进程按进程组精确归属(attributed=$T7H_ATTR)"
+    echo "--- 诊断:审计里含 t7h 的行:" | tee -a "$LOG"
+    grep 't7h' "$A7H" 2>/dev/null | head -3 | tee -a "$LOG"
+    echo "--- 诊断:t7h.out 前 5 行:" | tee -a "$LOG"
+    head -5 "$ROOT/t7h.out" 2>/dev/null | tee -a "$LOG"
+  fi
+  assert "T7j 越界路径标注为内核来源且精确" grep -q '"precision":"exact".*"source":"sandbox-log"' "$A7H"
+  if grep 't7h\.txt' "$A7H" 2>/dev/null | grep -q '"event":"violation.unattributed"'; then
+    bad "T7k 可归属的越界不应同时出现在未归属列表"
+  else
+    pass "T7k 可归属的越界不重复出现在未归属列表"
+  fi
+  "$BIN" authorize -p "$P7H" --path "$OUT" --access write >>"$LOG" 2>&1
+  wait "$T7H_PID"
+  cat "$ROOT/t7h.out" >> "$LOG"
 else
   assert "T7a 能力报告如实标注自动采集不可用" test "$AUTO_CAP" = "unavailable"
   warn "T7b 内核违规日志自动采集:该平台不可用,不计失败(见 docs/06)"
@@ -390,7 +514,7 @@ warn "T10d C20 ACL 清理:该后端不使用 ACL,由 Windows 冒烟实断言"
 CAP10_OK=$(printf '%s' "$CAP10" | python3 -c '
 import json,sys
 c=json.load(sys.stdin)["capabilities"]
-skip={"net_proxy","violation_log_probe"}
+skip={"net_proxy","violation_log_probe","violation_file_path_precision","violation_net_path_precision"}
 bad=[k for k,v in c.items() if k not in skip and v not in ("full","partial","unavailable")]
 print("ok" if not bad else "bad:"+",".join(bad))
 ' 2>/dev/null)
@@ -399,6 +523,154 @@ if [[ "$CAP10_OK" == "ok" ]]; then
 else
   bad "T10e 能力报告逐项状态明确 ($CAP10_OK)"
 fi
+
+# T10f 路径精度字段:取值必须是 exact/reported/none 之一(不虚报精度)
+CAP_PREC=$(printf '%s' "$CAP10" | python3 -c '
+import json,sys
+c=json.load(sys.stdin)["capabilities"]
+allowed={"exact","reported","none"}
+keys=("violation_file_path_precision","violation_net_path_precision")
+bad=[k+"="+str(c.get(k)) for k in keys if c.get(k) not in allowed]
+print("ok" if not bad else "bad:"+",".join(bad))
+' 2>/dev/null)
+if [[ "$CAP_PREC" == "ok" ]]; then
+  pass "T10f 越界路径精度字段取值合法(exact/reported/none)"
+else
+  bad "T10f 越界路径精度字段取值合法 ($CAP_PREC)"
+fi
+
+echo "" | tee -a "$LOG"
+
+# T11 L1:程序自报路径(stderr)。内核日志给的是「谁」,stderr 给的是「程序自己
+# 声称要什么」——归属确定但路径可伪造,故精度只能是 reported。
+# 两者互补:L2 拿不到归属时(短命深层进程)由 L1 顶上,反之亦然。
+echo "[$(date +%H:%M:%S)] == T11 L1:程序自报路径(stderr)==" | tee -a "$LOG"
+P11="$ROOT/p11.json"; A11="$ROOT/p11.audit.jsonl"; TASK11="smoke11-$$"
+python3 - "$P11" "$WS" "$A11" "$TASK11" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PY
+"$BIN" run -p "$P11" --json -- /bin/sh -c "echo hi > $OUT/t11.txt" >"$ROOT/t11.out" 2>&1 &
+T11_PID=$!
+for _ in $(seq 1 150); do
+  grep 't11\.txt' "$A11" 2>/dev/null | grep -q '"event":"violation' && break
+  sleep 0.2
+done
+assert "T11a 越界路径被采集(内核日志或 stderr 自报)" bash -c "grep 't11\.txt' '$A11' | grep -q '\"event\":\"violation\"'"
+T11_PREC=$(python3 -c 'import json,sys
+for ln in open(sys.argv[1]):
+    try: d=json.loads(ln)
+    except Exception: continue
+    if d.get("event")=="violation" and "t11.txt" in d.get("path",""):
+        print(d.get("precision")); break' "$A11" 2>/dev/null)
+if [[ "$T11_PREC" == "exact" || "$T11_PREC" == "reported" ]]; then
+  pass "T11b 越界路径精度已标注($T11_PREC)"
+else
+  bad "T11b 越界路径精度应标注 exact/reported(实际=$T11_PREC)"
+fi
+# 无内核通道的平台(Linux)只能靠 L1,精度必须如实落到 reported
+PROBE=$(printf '%s' "$CAP_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["capabilities"].get("violation_log_probe",""))' 2>/dev/null)
+if [[ -z "$PROBE" ]]; then
+  if [[ "$T11_PREC" == "reported" ]]; then
+    pass "T11c 无内核通道时精度如实为 reported"
+  else
+    bad "T11c 无内核通道时精度应为 reported(实际=$T11_PREC)"
+  fi
+else
+  pass "T11c 该平台有内核通道,精度可为 exact"
+fi
+"$BIN" authorize -p "$P11" --path "$OUT" --access write >>"$LOG" 2>&1
+wait "$T11_PID"
+cat "$ROOT/t11.out" >> "$LOG"
+
+
+# T14 status:agent 能拿到【具体】待授权路径(而不是只拿到数量)
+# ——agent 要拿它去问用户「允许写 /x/y 吗」,只给个数没法问。
+echo "[$(date +%H:%M:%S)] == T14 status 给出待授权的具体路径 ==" | tee -a "$LOG"
+P14="$ROOT/p14.json"; A14="$ROOT/p14.audit.jsonl"; TASK14="smoke14-$$"
+python3 - "$P14" "$WS" "$A14" "$TASK14" <<'PYJ'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PYJ
+"$BIN" run -p "$P14" --json -- "$BURN" retryflow "$OUT/t14.txt" grant >"$ROOT/t14.out" 2>&1 &
+T14_PID=$!
+T14_STATUS=""
+for _ in $(seq 1 100); do
+  T14_STATUS=$("$BIN" status -p "$P14" 2>"$ROOT/t14.status.err" || true)
+  # 必须判断 pending **非空**:字段名恒存在,只看字段名会第一次就 break
+  printf '%s' "$T14_STATUS" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(1)
+sys.exit(0 if d.get("pending") else 1)' && break
+  sleep 0.2
+done
+printf '%s' "$T14_STATUS" > "$ROOT/t14.status"
+assert "T14a status 给出待授权的具体路径" grep -q 't14.txt' "$ROOT/t14.status"
+assert "T14b status 标注路径精度与归属" grep -q '"precision"' "$ROOT/t14.status"
+assert "T14c status 报告 needs_approval 标志" grep -q '"needs_approval":true' "$ROOT/t14.status"
+"$BIN" authorize -p "$P14" --path "$OUT" --access write >>"$LOG" 2>&1
+wait "$T14_PID"
+cat "$ROOT/t14.out" >> "$LOG"
+
+# T15 对抗用例:程序【自称】一个无害路径,却【真实访问】另一个路径。
+#   - L2(内核日志,仅 macOS):应采到**真实被拒路径**(内核不受欺骗)→ precision=exact
+#   - L1(stderr 自报):只能采到**自称路径** → precision=reported
+#   - 授权【自称】路径后,真实路径仍必须被内核拒绝 → 伪造换不来越权
+echo "[$(date +%H:%M:%S)] == T15 对抗:自称路径 vs 真实路径 ==" | tee -a "$LOG"
+P15="$ROOT/p15.json"; A15="$ROOT/p15.audit.jsonl"; TASK15="smoke15-$$"
+python3 - "$P15" "$WS" "$A15" "$TASK15" <<'PYK'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PYK
+CLAIMED="$OUT/claimed.txt"; ACTUAL="$OUT/actual.txt"
+"$BIN" run -p "$P15" --json -- "$BURN" spoof "$CLAIMED" "$ACTUAL" >"$ROOT/t15.out" 2>&1 &
+T15_PID=$!
+for _ in $(seq 1 150); do
+  grep 'claimed\.txt' "$A15" 2>/dev/null | grep -q '"event":"violation' && break
+  sleep 0.2
+done
+# 有内核通道的平台(macOS):应同时采到两条,且精度不同
+if [[ -n "$PROBE" ]]; then
+  assert "T15a 内核通道采到真实被拒路径(precision=exact)" \
+    bash -c "grep 'actual\.txt' '$A15' | grep -q '\"precision\":\"exact\"'"
+  assert "T15b 自称路径仅由 stderr 自报(precision=reported)" \
+    bash -c "grep 'claimed\.txt' '$A15' | grep -q '\"precision\":\"reported\"'"
+else
+  assert "T15a 无内核通道时只采到自称路径" \
+    bash -c "grep 'claimed\.txt' '$A15' | grep -q '\"event\":\"violation\"'"
+  assert "T15b 无内核通道时采不到从未被拒的真实路径" \
+    bash -c "! grep -q 'actual\.txt' '$A15'"
+fi
+# 只授权【自称】路径 → 重跑 → 真实路径仍必须写不动
+"$BIN" authorize -p "$P15" --path "$CLAIMED" --access write >>"$LOG" 2>&1
+wait "$T15_PID"
+assert "T15c 授权自称路径后真实路径仍被拒(伪造不构成越权)" \
+  bash -c "! test -f '$ACTUAL'"
+cat "$ROOT/t15.out" >> "$LOG"
 
 echo "" | tee -a "$LOG"
 echo "SMOKE_DONE fail=$fail" | tee -a "$LOG"

@@ -366,13 +366,125 @@ try {
     Assert "T10d C20 任务结束无提权 ACL 残余" ($aclText -notmatch 'S-1-15-2-')
 
     # T10e 能力报告每个能力都有明确状态值
-    $skip = @('net_proxy','violation_log_probe')
+    # (路径精度两个字段是枚举值 exact/reported/none,不是 full/partial/unavailable)
+    $skip = @('net_proxy','violation_log_probe',
+              'violation_file_path_precision','violation_net_path_precision')
     $bad = @($cap10.capabilities.PSObject.Properties | Where-Object {
                $skip -notcontains $_.Name -and $_.Value -notin @('full','partial','unavailable') })
     Assert "T10e 能力报告逐项状态明确" ($bad.Count -eq 0)
     } catch {
       Warn "T10 段异常: $_"
       $script:rows += "| T10 段异常(未跑完) | **FAIL** |"
+      $script:fail++
+    }
+
+    # ── T11 L1:程序自报路径(stderr)───────────────────────────────
+    # Windows 的 ERROR_ACCESS_DENIED 本身**不含路径**,而 .NET / PowerShell
+    # 会把路径拼进异常消息("Access to the path 'X' is denied.")。
+    # L1 补上「该放行谁」,让 in-place 放行精确到单个路径,而不是整条命令豁免。
+    try {
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T11 L1:程序自报路径(stderr) =="
+    $p11 = Join-Path $root "p11.json"; $a11 = Join-Path $root "p11.audit.jsonl"
+    @{
+      task       = "smoke11-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{}
+      broker     = @{ audit_log = $a11; violation_capture = $true }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p11 -Encoding UTF8
+
+    $t11target = Join-Path $out "t11.txt"
+    & $bin run -p $p11 -- "$ws\burn.exe" stderrdeny $t11target 2>&1 |
+      Out-File "$ws\t11.out" -Encoding utf8
+    $t11audit = if (Test-Path $a11) { Get-Content $a11 -Raw } else { "" }
+    Assert "T11a stderr 自报路径被采集" ($t11audit -match '"source":"stderr-selfreport"')
+    Assert "T11b 路径精度标注为 reported" ($t11audit -match '"precision":"reported"')
+    Assert "T11c 归属确定(attributed=true)" ($t11audit -match '"attributed":true')
+    # JSON 里反斜杠被转义成双反斜杠,匹配前先做同样的转义
+    $t11esc = $t11target -replace '\\', '\\\\'
+    Assert "T11d 采集到的路径正确" ($t11audit -match [regex]::Escape($t11esc))
+    } catch {
+      Warn "T11 段异常: $_"
+      $script:rows += "| T11 段异常(未跑完) | **FAIL** |"
+      $script:fail++
+    }
+
+    # ── T12 B 契约:授权后重跑(launcher retry)─────────────────────
+    # 沙箱内程序写白名单外的路径 → 被拒(错误消息含路径)→ L1 采集 → 置 needs-approval
+    # → launcher 等宿主授权 → 把该路径并入策略快照(落 ACL)→ 重跑 → 成功。
+    # 与 Unix 侧 B 契约闭环一致:**重跑是主线**,in-place 只是 legacy 加速路径。
+    try {
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T12 B 契约:授权后重跑 =="
+    $p12 = Join-Path $root "p12.json"; $a12 = Join-Path $root "p12.audit.jsonl"
+    @{
+      task       = "smoke12-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{}
+      broker     = @{ audit_log = $a12; violation_capture = $true }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p12 -Encoding UTF8
+
+    $t12target = Join-Path $out "t12.txt"
+    $proc12 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -RedirectStandardOutput "$ws	12.out" -RedirectStandardError "$ws	12.err" `
+      -ArgumentList @('run','-p',$p12,'--',"$ws\burn.exe",'stderrdeny',$t12target)
+    for ($i = 0; $i -lt 100; $i++) {
+      if ((Test-Path $a12) -and (Select-String -Path $a12 -Pattern 'needs-approval' -Quiet)) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    & $bin authorize -p $p12 --path $t12target --access write 2>&1 | Out-Null
+    if (-not $proc12.WaitForExit(60000)) { $proc12.Kill() }
+    $rc12 = $proc12.ExitCode
+    Assert "T12a 授权后重跑成功" ($rc12 -eq 0)
+    Assert "T12b 文件真实落盘" (Test-Path $t12target)
+    Assert "T12c retry 事件已落审计" `
+      ((Test-Path $a12) -and (Select-String -Path $a12 -Pattern '"event":"retry"' -Quiet))
+    } catch {
+      Warn "T12 段异常: $_"
+      $script:rows += "| T12 段异常(未跑完) | **FAIL** |"
+      $script:fail++
+    }
+
+    # ── T13 授权粒度:不外溢 ──────────────────────────────────────
+    # 用户在审批框里同意的是「创建 newfile」这一个文件;若实现对父目录授 Modify,
+    # 实际授权范围就扩大到「改/删该目录下所有文件」→ 这是真实的越权面
+    # (Unix 侧不存在:bwrap 只 --bind 目标路径本身)。
+    # probe2 在一次 run 内先试 new(被拒→L1 采集→授权→重跑)、再试 existing:
+    # 授权后 new 应创建成功,而 existing 必须仍写不动、内容不变。
+    try {
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T13 授权粒度不外溢 =="
+    $p13 = Join-Path $root "p13.json"; $a13 = Join-Path $root "p13.audit.jsonl"
+    @{
+      task       = "smoke13-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{}
+      broker     = @{ audit_log = $a13; violation_capture = $true }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p13 -Encoding UTF8
+
+    $t13new = Join-Path $out "t13new.txt"
+    $t13old = Join-Path $out "t13old.txt"
+    Set-Content -Path $t13old -Value "orig" -Encoding UTF8
+    $proc13 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -RedirectStandardOutput "$ws\t13.out" -RedirectStandardError "$ws\t13.err" `
+      -ArgumentList @('run','-p',$p13,'--',"$ws\burn.exe",'probe2',$t13new,$t13old)
+    for ($i = 0; $i -lt 100; $i++) {
+      if ((Test-Path $a13) -and (Select-String -Path $a13 -Pattern 'needs-approval' -Quiet)) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    & $bin authorize -p $p13 --path $t13new --access write 2>&1 | Out-Null
+    if (-not $proc13.WaitForExit(60000)) { $proc13.Kill() }
+    $r13 = @(Get-Content "$ws\t13.out","$ws\t13.err" -ErrorAction SilentlyContinue) -join "`n"
+    Assert "T13a 授权后新文件创建成功" ($r13 -match "NEW_CREATED")
+    Assert "T13b 授权粒度不外溢(同目录既有文件仍不可写)" `
+      (($r13 -match "EXISTING_DENIED") -and ($r13 -notmatch "EXISTING_WRITEABLE"))
+    Assert "T13c 既有文件内容未被改动" ((Get-Content $t13old -Raw) -match "orig")
+    } catch {
+      Warn "T13 段异常: $_"
+      $script:rows += "| T13 段异常(未跑完) | **FAIL** |"
       $script:fail++
     }
   }
