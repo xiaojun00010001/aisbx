@@ -55,7 +55,10 @@ pub struct NetworkPolicy {
 
 impl Default for NetworkPolicy {
     fn default() -> Self {
-        Self { loopback: true, internet: false }
+        Self {
+            loopback: true,
+            internet: false,
+        }
     }
 }
 
@@ -104,7 +107,11 @@ impl Policy {
             return Err("task 不能为空".into());
         }
         // task 只允许安全字符,用于构造管道名/SID 标签
-        if !self.task.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !self
+            .task
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             return Err("task 只允许字母数字与 - _".into());
         }
         if let Some(m) = self.filesystem.escalation {
@@ -128,7 +135,10 @@ impl Policy {
     }
 
     pub fn pipe_name(&self) -> String {
-        self.broker.pipe_name.clone().unwrap_or_else(|| format!("aisbx-{}", self.task))
+        self.broker
+            .pipe_name
+            .clone()
+            .unwrap_or_else(|| format!("aisbx-{}", self.task))
     }
 }
 
@@ -192,8 +202,14 @@ mod tests {
     #[test]
     fn escalation_modes() {
         for (raw, want) in [
-            (r#"{ "task": "t", "filesystem": { "escalation": "auto" } }"#, EscalationMode::Auto),
-            (r#"{ "task": "t", "filesystem": { "escalation": "deny" } }"#, EscalationMode::Deny),
+            (
+                r#"{ "task": "t", "filesystem": { "escalation": "auto" } }"#,
+                EscalationMode::Auto,
+            ),
+            (
+                r#"{ "task": "t", "filesystem": { "escalation": "deny" } }"#,
+                EscalationMode::Deny,
+            ),
             (r#"{ "task": "t" }"#, EscalationMode::Prompt),
         ] {
             assert_eq!(Policy::parse(raw).unwrap().escalation_mode(), want);
@@ -210,7 +226,8 @@ mod tests {
     fn violation_capture_defaults_off() {
         let p = Policy::parse(r#"{ "task": "t" }"#).unwrap();
         assert!(!p.broker.capture_violations());
-        let p = Policy::parse(r#"{ "task": "t", "broker": { "violation_capture": true } }"#).unwrap();
+        let p =
+            Policy::parse(r#"{ "task": "t", "broker": { "violation_capture": true } }"#).unwrap();
         assert!(p.broker.capture_violations());
     }
 }
