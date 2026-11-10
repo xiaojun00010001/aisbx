@@ -75,9 +75,10 @@ jobs:
           git config --global core.editor true 2>&1 | Out-Null
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ci
-          git commit -q -m "ci: record run $env:GITHUB_RUN_ID windows [skip ci]"
-          if ($LASTEXITCODE -ne 0) { Write-Host "::notice::commit 失败,回写跳过"; exit 0 }
+          git add -A ci 2>&1 | Out-Null
+          # ⚠️ 不要在 commit 失败时 exit:无变更时 commit 会返回非零 → 直接退出
+          # 就**永远走不到 push**,分支一个都没建成(实测,与 Unix 侧同一个坑)。
+          git commit -q -m "ci: record run $env:GITHUB_RUN_ID windows [skip ci]" 2>&1 | Out-Null
           # actions/checkout 可能是 detached HEAD → 先确保在 main 分支上
           # 独立分支:与其它 job 的回写零竞争
           $br = "ci-run/windows-smoke"
