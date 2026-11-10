@@ -616,6 +616,9 @@ try {
       Start-Sleep -Milliseconds 200
     }
     $a15txt = if (Test-Path $a15) { Get-Content $a15 -Raw } else { "" }
+    # 审计打进日志:T15a 失败时能直接看到实际采到了什么(路径形态/来源/精度)
+    Write-Host "----- T15 审计 -----"
+    Write-Host $a15txt
     Assert "T15a 采到自称路径且精度为 reported" `
       (($a15txt -match 't15claimed') -and ($a15txt -match '"precision":"reported"'))
     # ⚠️ 只排除**内核通道**采到的条目:策略感知(source=explicit)也会记下
@@ -681,6 +684,10 @@ try {
       '--audit', $cpa,
       '--exit-code', "$cpRc")
     # 输出继承控制台(不重定向)→ 避开上面那条路径坑;只看退出码
+    # 报告落进回写目录:契约检查的输出继承控制台,而 Issue 只带 smoke.log →
+    # 失败详情会丢;落盘才能随结果一起被读到。
+    New-Item -ItemType Directory -Force -Path "ci/runs" | Out-Null
+    $env:CONTRACT_REPORT_OUT = "ci/runs/contract-$cpPlatform.md"
     $pChk = Start-Process -FilePath "python" -NoNewWindow -PassThru -ArgumentList $cArgs
     if (-not $pChk.WaitForExit(30000)) {
       $pChk.Kill()

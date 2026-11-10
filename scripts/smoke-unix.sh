@@ -787,7 +787,9 @@ CP_RC=$?
 # ⚠️ 平台名必须取自能力报告的 backend:同一个 Unix 脚本在 macOS 与 Linux
 # 两个 runner 上跑,写死 linux 会让 macOS 拿 Linux 的期望去比 → 假失败。
 CP_PLATFORM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['backend'])" "$CP/caps.json")
-if timeout 60 python3 scripts/contract_check.py \
+mkdir -p ci/runs
+if CONTRACT_REPORT_OUT="ci/runs/contract-$CP_PLATFORM.md" \
+  timeout 60 python3 scripts/contract_check.py \
      --caps "$CP/caps.json" \
      --baseline scripts/contract-baseline.json \
      --platform "$CP_PLATFORM" \

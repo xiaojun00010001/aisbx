@@ -25,13 +25,20 @@ FAILURES = []
 CHECKS = 0
 
 
+REPORT = []
+
+
 def check(name, ok, detail=""):
     global CHECKS
     CHECKS += 1
-    if ok:
-        print("  PASS  [契约] %s%s" % (name, (" — " + detail) if detail else ""))
-    else:
-        print("  FAIL  [契约] %s%s" % (name, (" — " + detail) if detail else ""))
+    line = "  %s  [契约] %s%s" % (
+        "PASS" if ok else "FAIL",
+        name,
+        (" — " + detail) if detail else "",
+    )
+    REPORT.append(line)
+    print(line)
+    if not ok:
         FAILURES.append(name)
 
 
@@ -74,6 +81,7 @@ def main():
     ap.add_argument("--events", default="", help="--json 事件流 JSONL")
     ap.add_argument("--audit", default="", help="审计 JSONL")
     ap.add_argument("--exit-code", type=int, default=None, help="被测命令的退出码")
+    ap.add_argument("--out", default="", help="把报告另存到该文件(便于随 CI 结果回写)")
     args = ap.parse_args()
 
     base = load_json(args.baseline)
@@ -195,12 +203,29 @@ def main():
 
 
 def finish():
-    print("")
+    tail = []
     if FAILURES:
-        print("契约检查失败 %d 项:%s" % (len(FAILURES), "; ".join(FAILURES)))
-        return 1
-    print("契约检查全部通过(%d 项)" % CHECKS)
-    return 0
+        tail.append("")
+        tail.append("契约检查失败 %d 项:%s" % (len(FAILURES), "; ".join(FAILURES)))
+        rc = 1
+    else:
+        tail.append("")
+        tail.append("契约检查全部通过(%d 项)" % CHECKS)
+        rc = 0
+    for t in tail:
+        print(t)
+        REPORT.append(t)
+    out = os.environ.get("CONTRACT_REPORT_OUT", "").strip()
+    if out:
+        # 报告落文件:Windows 上契约检查的输出继承控制台,Issue 只带 smoke.log →
+        # 失败详情会丢。落进回写目录就能随结果一起被读到。
+        try:
+            os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("\n".join(REPORT) + "\n")
+        except Exception as e:
+            print("契约报告写文件失败: %s" % e)
+    return rc
 
 
 if __name__ == "__main__":
