@@ -510,6 +510,39 @@ try {
       $script:rows += "| T13 段异常(未跑完) | **FAIL** |"
       $script:fail++
     }
+
+    # ── 跨平台契约检查(与 Unix **共用同一份** contract_check.py 与基线)──
+    # 目的是保证「三个环境的表现形式与交互一样」:能力报告的键集合、
+    # --json 事件流的事件名、审计事件类型、退出码语义,三平台必须一致。
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == 跨平台契约检查 =="
+    $cp = Join-Path $root "contract"
+    New-Item -ItemType Directory -Force -Path $cp | Out-Null
+    # 用 WriteAllText 而不是 Out-File:PS 5.1 的 utf8 会带 BOM,JSON 解析会失败
+    [System.IO.File]::WriteAllText("$cp\caps.json", ((& $bin capabilities) | Out-String))
+    $cpp = Join-Path $cp "policy.json"
+    $cpa = Join-Path $cp "audit.jsonl"
+    @{
+      task       = "contract-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{}
+      broker     = @{ audit_log = $cpa; violation_capture = $true }
+    } | ConvertTo-Json -Depth 5 | Set-Content $cpp -Encoding UTF8
+    $cpe = Join-Path $cp "events.jsonl"
+    & $bin run -p $cpp --json -- "$ws\burn.exe" stderrdeny (Join-Path $out "contract.txt") > $cpe 2>$null
+    $cpRc = $LASTEXITCODE
+    if (python scripts/contract_check.py `
+          --caps "$cp\caps.json" `
+          --baseline scripts/contract-baseline.json `
+          --platform windows `
+          --events $cpe `
+          --audit $cpa `
+          --exit-code $cpRc) {
+      Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" $true
+    } else {
+      Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" $false
+    }
   }
 }
 finally {

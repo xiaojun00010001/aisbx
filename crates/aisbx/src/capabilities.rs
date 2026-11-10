@@ -9,6 +9,69 @@ fn command_exists(name: &str) -> bool {
     std::env::split_paths(&path).any(|d| d.join(name).is_file())
 }
 
+/// 能力报告的**键集合**:三平台必须完全一致。
+///
+/// agent 按键消费能力报告 → 某平台缺键,等于 agent 在那个平台上
+/// 拿不到这项信息(只能靠「键不存在」去猜,而不是读到一个明确的
+/// 「不可用」)。所以键集合由这里统一给出,各平台只填**值**。
+///
+/// 分两类:
+/// - 状态类:值 ∈ {full, partial, unavailable};
+/// - 描述类:值是具体机制名/精度,空串表示「该通道在此平台不存在」。
+///
+/// `violation_log_probe` 用**空串**表示「没有内核日志通道」——
+/// 与 macOS 的既有语义一致(非空 = 有通道),且不会被 `--require-full`
+/// 的 unavailable 判定误伤。
+#[cfg_attr(not(test), allow(dead_code))]
+pub const CAP_KEYS: &[&str] = &[
+    // ── 状态类 ────────────────────────────────────────────────────────
+    "strategy",
+    "denial_detection",
+    "authorized_retry",
+    "launcher_retry",
+    "file_isolation",
+    "network_egress",
+    "memory_per_process",
+    "memory_total",
+    "cpu",
+    "process_limit",
+    "process_tree_kill",
+    "auto_violation_capture",
+    "net_violation_capture",
+    // ── 描述类 ────────────────────────────────────────────────────────
+    "net_proxy",
+    "violation_file_path_precision",
+    "violation_net_path_precision",
+    "violation_log_probe",
+    // ── 机制探测(各平台只报自己用的那一个,其余标 unavailable)────────
+    "seatbelt",
+    "bubblewrap",
+    "landlock",
+    "seccomp",
+];
+
+/// 状态类能力键:值只能是 full / partial / unavailable。
+#[cfg_attr(not(test), allow(dead_code))]
+const STATUS_KEYS: &[&str] = &[
+    "strategy",
+    "denial_detection",
+    "authorized_retry",
+    "launcher_retry",
+    "file_isolation",
+    "network_egress",
+    "memory_per_process",
+    "memory_total",
+    "cpu",
+    "process_limit",
+    "process_tree_kill",
+    "auto_violation_capture",
+    "net_violation_capture",
+    "seatbelt",
+    "bubblewrap",
+    "landlock",
+    "seccomp",
+];
+
 pub fn report() -> Value {
     #[cfg(windows)]
     {
@@ -37,7 +100,15 @@ pub fn report() -> Value {
                 "net_violation_capture": "partial",
                 "net_proxy": "http-connect+socks5",
                 "violation_file_path_precision": "reported",
-                "violation_net_path_precision": "exact"
+                "violation_net_path_precision": "exact",
+                // 内核日志通道:Windows 没有等价物 → 空串(=该通道不存在)。
+                // 与 macOS 的非空值同义,agent 只需判断「非空即有通道」。
+                "violation_log_probe": "",
+                // 机制探测:Windows 不用这些,显式标 unavailable 而不是缺键。
+                "seatbelt": "unavailable",
+                "bubblewrap": "unavailable",
+                "landlock": "unavailable",
+                "seccomp": "unavailable"
             }
         })
     }
@@ -74,7 +145,14 @@ pub fn report() -> Value {
                 // net=exact:路径由 CONNECT 协议自带。
                 "violation_file_path_precision": "exact",
                 "violation_net_path_precision": "exact",
-                "seatbelt": if sb { "full" } else { "unavailable" }
+                // B 契约主循环(授权 → 并入策略快照 → 重跑)在 Unix 侧统一实现,
+                // 与 Windows 一致 → launcher_retry 三平台同口径。
+                "launcher_retry": "full",
+                "seatbelt": if sb { "full" } else { "unavailable" },
+                // 机制探测:macOS 只用 Seatbelt,其余显式标 unavailable。
+                "bubblewrap": "unavailable",
+                "landlock": "unavailable",
+                "seccomp": "unavailable"
             }
         })
     }
@@ -107,15 +185,39 @@ pub fn report() -> Value {
                 "net_proxy": "http-connect+socks5",
                 "violation_file_path_precision": "reported",
                 "violation_net_path_precision": "exact",
+                // B 契约主循环与 Windows/macOS 同口径。
+                "launcher_retry": "full",
+                // Linux 侧尚无内核日志通道(Landlock 6.15 audit / auditd AVC
+                // 未接入)→ 空串(=该通道不存在),不是缺键。
+                "violation_log_probe": "",
                 "bubblewrap": if bwrap { "full" } else { "unavailable" },
                 "landlock": if landlock { "partial" } else { "unavailable" },
-                "seccomp": if bwrap { "partial" } else { "unavailable" }
+                "seccomp": if bwrap { "partial" } else { "unavailable" },
+                "seatbelt": "unavailable"
             }
         })
     }
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
-        json!({"backend": "unsupported", "contract": "B", "capabilities": {}})
+        // 未支持的平台:键集合仍与契约一致(状态类全 unavailable、描述类空串),
+        // 这样「某个键存不存在」永远不是平台差异,只有**值**不同。
+        let caps: serde_json::Map<String, Value> = CAP_KEYS
+            .iter()
+            .map(|k| {
+                let v = if STATUS_KEYS.contains(k) {
+                    "unavailable"
+                } else {
+                    ""
+                };
+                (k.to_string(), json!(v))
+            })
+            .collect();
+        json!({
+            "backend": "unsupported",
+            "contract": "B",
+            "effect": "retry",
+            "capabilities": caps
+        })
     }
 }
 
@@ -155,5 +257,61 @@ pub fn require_full(report: &Value) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("严格模式下以下能力不可用: {}", fatal.join(", ")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 三平台跑**同一份**单测 → 只要都绿,能力报告的键集合就必然一致。
+    ///
+    /// 这比「在 CI 里比对三份 JSON」更可靠:键集合由 CAP_KEYS 唯一决定,
+    /// 任何平台漏报/多报都会在这里红,而不是等到 agent 在某个平台上
+    /// 发现「这个键怎么没有」。
+    #[test]
+    fn capability_keys_match_the_shared_contract() {
+        let r = report();
+        let caps = r
+            .get("capabilities")
+            .and_then(|v| v.as_object())
+            .expect("能力报告缺少 capabilities");
+        let mut got: Vec<&str> = caps.keys().map(|k| k.as_str()).collect();
+        got.sort_unstable();
+        let mut want: Vec<&str> = CAP_KEYS.to_vec();
+        want.sort_unstable();
+        assert_eq!(got, want, "能力键集合与共享契约不一致");
+    }
+
+    /// 状态类能力的值只能是 full / partial / unavailable —— 消费方
+    /// (`--require-full`、agent)按这三个值分支,出现别的值就是契约破坏。
+    #[test]
+    fn status_capability_values_are_legal() {
+        let r = report();
+        let caps = r
+            .get("capabilities")
+            .and_then(|v| v.as_object())
+            .expect("能力报告缺少 capabilities");
+        for k in STATUS_KEYS {
+            let v = caps
+                .get(*k)
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("能力 {k} 缺失或不是字符串"));
+            assert!(
+                matches!(v, "full" | "partial" | "unavailable"),
+                "能力 {k} 的值 {v} 不在 {{full, partial, unavailable}} 内"
+            );
+        }
+    }
+
+    /// 顶层结构三平台一致:backend / contract / effect / capabilities。
+    #[test]
+    fn top_level_shape_is_identical() {
+        let r = report();
+        for k in ["backend", "contract", "effect", "capabilities"] {
+            assert!(r.get(k).is_some(), "能力报告缺少顶层键 {k}");
+        }
+        assert_eq!(r["contract"], "B");
+        assert_eq!(r["effect"], "retry");
     }
 }

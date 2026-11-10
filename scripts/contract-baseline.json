@@ -1,0 +1,135 @@
+{
+  "_comment": "跨平台契约基线:三平台共用。键/事件集合必须严格一致,值可以按平台不同。改动这里等于改契约 —— 三个平台的 CI 会同时验证。",
+  "top_level_keys": ["backend", "capabilities", "contract", "effect"],
+  "contract": "B",
+  "effect": "retry",
+
+  "capability_keys": [
+    "authorized_retry",
+    "auto_violation_capture",
+    "bubblewrap",
+    "cpu",
+    "denial_detection",
+    "file_isolation",
+    "landlock",
+    "launcher_retry",
+    "memory_per_process",
+    "memory_total",
+    "net_proxy",
+    "net_violation_capture",
+    "network_egress",
+    "process_limit",
+    "process_tree_kill",
+    "seatbelt",
+    "seccomp",
+    "strategy",
+    "violation_file_path_precision",
+    "violation_log_probe",
+    "violation_net_path_precision"
+  ],
+
+  "status_keys": [
+    "authorized_retry",
+    "auto_violation_capture",
+    "bubblewrap",
+    "cpu",
+    "denial_detection",
+    "file_isolation",
+    "landlock",
+    "launcher_retry",
+    "memory_per_process",
+    "memory_total",
+    "net_violation_capture",
+    "network_egress",
+    "process_limit",
+    "process_tree_kill",
+    "seatbelt",
+    "seccomp",
+    "strategy"
+  ],
+
+  "described_keys": [
+    "net_proxy",
+    "violation_file_path_precision",
+    "violation_log_probe",
+    "violation_net_path_precision"
+  ],
+
+  "_empty_allowed": "violation_log_probe 用空串表示「该平台没有内核日志通道」——与 macOS 的非空值同义,agent 只需判断非空即有通道。",
+  "empty_allowed_keys": ["violation_log_probe"],
+
+  "platform_expect": {
+    "macos": {
+      "launcher_retry": "full",
+      "file_isolation": "full",
+      "violation_file_path_precision": "exact",
+      "violation_log_probe": "nonempty",
+      "violation_net_path_precision": "exact"
+    },
+    "linux": {
+      "launcher_retry": "full",
+      "file_isolation": "full",
+      "violation_file_path_precision": "reported",
+      "violation_log_probe": "empty",
+      "violation_net_path_precision": "exact"
+    },
+    "windows": {
+      "launcher_retry": "full",
+      "file_isolation": "full",
+      "violation_file_path_precision": "reported",
+      "violation_log_probe": "empty",
+      "violation_net_path_precision": "exact"
+    }
+  },
+
+  "_events": "event_names_allowed = 允许出现的全部事件名;event_names_required = 任何一次 run 都必须出现的事件(其余按场景由各冒烟脚本断言)。",
+  "event_names_allowed": [
+    "authorize.reject",
+    "escalation.deny",
+    "escalation.grant",
+    "escalation.pending",
+    "exit",
+    "net.grant",
+    "network",
+    "proxy",
+    "proxy.deny",
+    "proxy.upstream_unreachable",
+    "retry",
+    "sid",
+    "spawned",
+    "token.issued",
+    "token.redeemed",
+    "token.reject",
+    "violation",
+    "violation.capture.miss",
+    "violation.captured",
+    "violation.unattributed"
+  ],
+  "event_names_required": ["spawned", "exit"],
+
+  "audit_events_allowed": [
+    "authorize.reject",
+    "escalation.deny",
+    "escalation.grant",
+    "escalation.pending",
+    "exit",
+    "net.grant",
+    "network",
+    "proxy",
+    "proxy.deny",
+    "proxy.upstream_unreachable",
+    "retry",
+    "sid",
+    "spawned",
+    "token.issued",
+    "token.redeemed",
+    "token.reject",
+    "violation",
+    "violation.capture.miss",
+    "violation.captured",
+    "violation.unattributed"
+  ],
+
+  "_exit": "0=成功 1=被拒 2=用法/环境错 3=等待授权超时 99=内部失败",
+  "exit_codes_allowed": [0, 1, 2, 3, 99]
+}

@@ -687,6 +687,41 @@ assert "T15c 授权自称路径后真实路径仍被拒(伪造不构成越权)" 
   bash -c "! test -f '$ACTUAL'"
 cat "$ROOT/t15.out" >> "$LOG"
 
+# ── 跨平台契约检查(与 Windows **共用同一份** contract_check.py 与基线)──
+# 目的是保证「三个环境的表现形式与交互一样」:能力报告的键集合、
+# --json 事件流的事件名、审计事件类型、退出码语义,三平台必须一致。
+echo "[$(date +%H:%M:%S)] == 跨平台契约检查 ==" | tee -a "$LOG"
+CP="$ROOT/contract"; mkdir -p "$CP"
+"$BIN" capabilities > "$CP/caps.json" 2>/dev/null
+python3 - "$CP/policy.json" "$WS" "$CP/audit.jsonl" "contract-$$" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PY
+# 一次最小越界 run:收集 --json 事件流、审计与退出码
+"$BIN" run -p "$CP/policy.json" --json -- /bin/sh -c "echo hi > $OUT/contract.txt" \
+  > "$CP/events.jsonl" 2>"$CP/run.err"
+CP_RC=$?
+if python3 scripts/contract_check.py \
+     --caps "$CP/caps.json" \
+     --baseline scripts/contract-baseline.json \
+     --platform linux \
+     --events "$CP/events.jsonl" \
+     --audit "$CP/audit.jsonl" \
+     --exit-code "$CP_RC" >>"$LOG" 2>&1; then
+  pass "契约检查:能力/事件/审计/退出码 三平台同一份契约"
+else
+  bad "契约检查:能力/事件/审计/退出码 三平台同一份契约"
+  cat "$CP/events.jsonl" >> "$LOG" 2>/dev/null || true
+fi
+
 echo "" | tee -a "$LOG"
 echo "SMOKE_DONE fail=$fail" | tee -a "$LOG"
 if [[ $fail -eq 0 ]]; then
