@@ -786,7 +786,13 @@ PY
 # 退出码 127 → 契约检查凭空判 2 项 FAIL(实测 macOS 就是这么红的,并非契约不一致)。
 # 改用 python3 做超时(脚本本身就依赖 python3,三平台都有)——
 # 语义与 Windows 侧的 Start-Process + WaitForExit 一致。
-CP_RC=$(python3 - "$BIN" "$CP/policy.json" "$CP/events.jsonl" "$CP/run.err" "$OUT/contract.txt" <<'PY'
+# ⚠️ `CP_RC=$(cmd)` 捕获的是 **stdout**,不是退出码!
+# 原版是「命令 + 重定向到文件」+ 单独一行 `$?`,所以取的是退出码;
+# 改成命令替换后就变成了捕获 stdout → CP_RC 是空串 →
+# `--exit-code ''` → argparse 直接报错退出 → 契约检查被判 FAIL 且**不产生报告**。
+# 要拿退出码必须用 $?。
+CP_RC=0
+python3 - "$BIN" "$CP/policy.json" "$CP/events.jsonl" "$CP/run.err" "$OUT/contract.txt" <<'PY'
 import subprocess, sys
 
 bin_, policy, events, err, target = sys.argv[1:]
@@ -803,7 +809,7 @@ except Exception as e:
     rc = 125
 sys.exit(rc)
 PY
-)
+CP_RC=$?
 # ⚠️ 平台名必须取自能力报告的 backend:同一个 Unix 脚本在 macOS 与 Linux
 # 两个 runner 上跑,写死 linux 会让 macOS 拿 Linux 的期望去比 → 假失败。
 CP_PLATFORM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['backend'])" "$CP/caps.json")

@@ -50,12 +50,14 @@ jobs:
 
       # ── 门禁后置:红了不影响上面已拿到的冒烟结果 ──────────────────────
       - name: Format check
+        if: always()   # 冒烟失败也要跑:否则看不到门禁本身是否也坏
         shell: bash
         run: |
           set -o pipefail
           cargo fmt --all --check 2>&1 | tee fmt.log
 
       - name: Clippy (deny warnings)
+        if: always()   # 冒烟失败也要跑:否则看不到门禁本身是否也坏
         shell: bash
         run: |
           set -o pipefail
@@ -63,6 +65,7 @@ jobs:
 
       # ⚠️ 此前只跑 `cargo test -p aisbx-policy`,aisbx crate 自身的单测从未进 CI。
       - name: Unit tests (all crates)
+        if: always()   # 冒烟失败也要跑:否则看不到门禁本身是否也坏
         shell: bash
         run: |
           set -o pipefail
