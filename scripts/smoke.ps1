@@ -608,10 +608,13 @@ try {
     $cpe = Join-Path $cp "events.jsonl"
     & $bin run -p $cpp --json -- "$ws\burn.exe" stderrdeny (Join-Path $out "contract.txt") > $cpe 2>$null
     $cpRc = $LASTEXITCODE
+    # 平台名取自能力报告的 backend(不写死):契约基线按平台给期望值,
+    # 写死会在平台间张冠李戴(实测 macOS 被 Linux 的期望判失败)。
+    $cpPlatform = (Get-Content "$cp\caps.json" -Raw | ConvertFrom-Json).backend
     if (python scripts/contract_check.py `
           --caps "$cp\caps.json" `
           --baseline scripts/contract-baseline.json `
-          --platform windows `
+          --platform $cpPlatform `
           --events $cpe `
           --audit $cpa `
           --exit-code $cpRc) {
