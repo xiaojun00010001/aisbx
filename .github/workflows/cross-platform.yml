@@ -1,9 +1,13 @@
 name: cross-platform-smoke
 
 # 方案 B 契约的三平台验证:
-#   windows-smoke.yml 负责 Windows 的 18 项原生断言;
+#   windows-smoke.yml 负责 Windows 的原生断言(冒烟);
 #   本工作流负责 Linux/macOS 的 B 契约冒烟 + Windows 编译检查。
-# 失败时把完整日志发到 Issue(公开仓库可无鉴权读取),便于远端诊断。
+#
+# ⚠️ 步骤顺序原则:**主验证(冒烟)在前,门禁(fmt/clippy/test)在后**。
+#   门禁一红就把后面的步骤全挡住 → 一次失败什么信息都拿不到。
+#   倒序后即使门禁红,冒烟结果也已经落盘并回写。
+#   失败时把完整日志发到 Issue(公开仓库可无鉴权读取),便于远端诊断。
 on:
   push:
     branches: [main]
@@ -31,22 +35,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bubblewrap iproute2
 
       - name: Toolchain
-        run: rustc -Vv && cargo -V
-
-      - name: Format check
-        run: cargo fmt --all --check
-
-      - name: Clippy (deny warnings)
-        run: |
-          set -o pipefail
-          cargo clippy --all-targets -- -D warnings 2>&1 | tee clippy.log
-
-      # ⚠️ 此前只跑 `cargo test -p aisbx-policy`,aisbx crate 自身的单测从未进 CI。
-      # 用 --workspace 覆盖全部 crate(含 doctest)。
-      - name: Unit tests (all crates)
-        run: |
-          set -o pipefail
-          cargo test --workspace 2>&1 | tee test.log
+        run: rustc -Vv && cargo -V && cargo fmt --version
 
       - name: Build
         run: cargo build --bins --example burn
@@ -54,9 +43,30 @@ jobs:
       - name: Capability report
         run: cargo run --quiet --bin aisbx -- capabilities
 
+      # ── 主验证:冒烟先跑 ────────────────────────────────────────────
       - name: Smoke (B contract)
         shell: bash
         run: bash scripts/smoke-unix.sh 2>&1 | tee smoke.log
+
+      # ── 门禁后置:红了不影响上面已拿到的冒烟结果 ──────────────────────
+      - name: Format check
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all --check 2>&1 | tee fmt.log
+
+      - name: Clippy (deny warnings)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee clippy.log
+
+      # ⚠️ 此前只跑 `cargo test -p aisbx-policy`,aisbx crate 自身的单测从未进 CI。
+      - name: Unit tests (all crates)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee test.log
 
       - name: Publish run result to repo
         if: always()
@@ -75,7 +85,7 @@ jobs:
             echo "- job status: ${{ job.status }}"
             echo
             echo '```text'
-            cat smoke.log clippy.log test.log 2>/dev/null | tail -n 400 || true
+            cat smoke.log fmt.log clippy.log test.log 2>/dev/null | tail -n 500 || true
             echo '```'
           } > "$out"
           cp "$out" ci/last-run.md
@@ -83,7 +93,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ci
           git commit -q -m "ci: record run ${{ github.run_id }} ${{ matrix.os }} [skip ci]" || exit 0
-          git push || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志"
+          # 三个 job 并发回写会互相冲突 → 先 rebase 再推
+          git pull --rebase origin main || true
+          git push || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志与 Issue"
 
       - name: Publish failure log
         if: failure()
@@ -91,10 +103,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test -f smoke.log || echo "no smoke.log" > smoke.log
+          { test -f smoke.log || echo "no smoke.log"; } > all.log
+          for f in fmt.log clippy.log test.log; do
+            { echo "===== $f ====="; cat "$f" 2>/dev/null; } >> all.log
+          done
           python3 - <<'PY'
           import json, os, urllib.request
-          raw = open("smoke.log", errors="replace").read()[-60000:]
+          raw = open("all.log", errors="replace").read()[-60000:]
           title = "smoke failure %s %s" % (os.environ["GITHUB_RUN_ID"], os.environ["RUNNER_OS"])
           run = "%s/%s/actions/runs/%s" % (
               os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"])
@@ -113,23 +128,28 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Toolchain
-        run: rustc -Vv && cargo -V
-      - name: Format check
-        run: cargo fmt --all --check
-      - name: Clippy (deny warnings)
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo clippy --all-targets -- -D warnings 2>&1 | tee clippy.log
-      - name: Unit tests (all crates)
-        run: cargo test --workspace
+        run: rustc -Vv && cargo -V && cargo fmt --version
       - name: Build (Windows backend unchanged)
         run: cargo build --bins --example burn
       - name: Cargo check all targets
         run: cargo check --all-targets
       - name: Capability report
         run: cargo run --quiet --bin aisbx -- capabilities
-
+      - name: Format check
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all --check 2>&1 | tee fmt.log
+      - name: Clippy (deny warnings)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets -- -D warnings 2>&1 | tee clippy.log
+      - name: Unit tests (all crates)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee test.log
       - name: Publish run result to repo
         if: always()
         shell: bash
@@ -146,7 +166,7 @@ jobs:
             echo "- job status: ${{ job.status }}"
             echo
             echo '```text'
-            cat clippy.log test.log 2>/dev/null | tail -n 200 || true
+            cat fmt.log clippy.log test.log 2>/dev/null | tail -n 300 || true
             echo '```'
           } > "$out"
           cp "$out" ci/last-run.md
@@ -154,4 +174,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ci
           git commit -q -m "ci: record run ${{ github.run_id }} windows-check [skip ci]" || exit 0
+          git pull --rebase origin main || true
           git push || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志"

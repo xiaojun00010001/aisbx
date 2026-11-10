@@ -1,5 +1,8 @@
 name: windows-smoke
 
+# ⚠️ 步骤顺序原则:**主验证(冒烟)在前,门禁(test)在后**。
+#   门禁一红就把后面的步骤全挡住 → 一次失败什么信息都拿不到。
+#   倒序后即使单测红,冒烟结果也已经落盘并回写。
 on:
   push:
     branches: [main]
@@ -19,16 +22,10 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Toolchain
-        run: rustc -Vv && cargo -V
+        run: rustc -Vv && cargo -V && cargo fmt --version
 
-      # Windows 侧此前从未跑过 cargo test:单测只在 Unix 侧执行过。
-      - name: Unit tests (all crates)
-        shell: pwsh
-        run: |
-          cargo test --workspace 2>&1 | Tee-Object -FilePath test.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Smoke (AppContainer + Job + token 闭环, 18 项断言)
+      # ── 主验证:冒烟先跑 ────────────────────────────────────────────
+      - name: Smoke (AppContainer + Job + token 闭环, 46 项断言)
         shell: pwsh
         run: |
           & .\scripts\smoke.ps1 *>&1 | Tee-Object -FilePath smoke.log
@@ -37,6 +34,14 @@ jobs:
             Get-Content smoke.log | Select-Object -Last 20 | ForEach-Object { Write-Host "::error::$_" }
           }
           exit $code
+
+      # ── 门禁后置 ───────────────────────────────────────────────────
+      # Windows 侧此前从未跑过 cargo test:单测只在 Unix 侧执行过。
+      - name: Unit tests (all crates)
+        shell: pwsh
+        run: |
+          cargo test --workspace 2>&1 | Tee-Object -FilePath test.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish run result to repo
         if: always()
@@ -48,9 +53,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path ci/runs | Out-Null
           $raw = ""
           foreach ($f in @("smoke.log", "test.log")) {
-            if (Test-Path $f) { $raw += (Get-Content $f -Raw) }
+            if (Test-Path $f) { $raw += "===== $f =====`n" + (Get-Content $f -Raw) + "`n" }
           }
-          if ($raw.Length -gt 40000) { $raw = $raw.Substring($raw.Length - 40000) }
+          if ($raw.Length -gt 60000) { $raw = $raw.Substring($raw.Length - 60000) }
           $md = "# CI run $env:GITHUB_RUN_ID (windows)`n`n- commit: $env:GITHUB_SHA`n- job status: $env:JOB_STATUS`n`n" +
                 "```text`n" + $raw + "`n```"
           Set-Content "ci/runs/$env:GITHUB_RUN_ID-windows.md" -Value $md -Encoding utf8
@@ -60,8 +65,11 @@ jobs:
           git add ci
           git commit -q -m "ci: record run $env:GITHUB_RUN_ID windows [skip ci]"
           if ($LASTEXITCODE -ne 0) { Write-Host "::notice::commit 失败,回写跳过"; exit 0 }
+          # 多个 job 并发回写会互相冲突 → 先 rebase 再推
+          git pull --rebase origin main
+          if ($LASTEXITCODE -ne 0) { Write-Host "::notice::rebase 失败,回写跳过"; exit 0 }
           git push
-          if ($LASTEXITCODE -ne 0) { Write-Host "::notice::结果回写失败(分支可能受保护),请看 run 日志" }
+          if ($LASTEXITCODE -ne 0) { Write-Host "::notice::结果回写失败(分支可能受保护),请看 run 日志与 Issue" }
 
       # 失败时把完整日志落到 Issue:公开仓库可经 REST API 无鉴权读取,便于远端诊断
       - name: Publish failure log
@@ -71,8 +79,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if (-not (Test-Path smoke.log)) { "smoke.log missing" | Out-File smoke.log -Encoding utf8 }
-          $raw = Get-Content smoke.log -Raw
-          if ($raw -match 'SMOKE_DONE fail=0') { Write-Host 'smoke 已通过,跳过发布'; exit 0 }
+          $raw = ""
+          foreach ($f in @("smoke.log", "test.log")) {
+            if (Test-Path $f) { $raw += "===== $f =====`n" + (Get-Content $f -Raw) + "`n" }
+          }
+          if ($raw -match 'SMOKE_DONE fail=0' -and $raw -notmatch 'test result: FAILED') {
+            Write-Host 'smoke 已通过,跳过发布'; exit 0
+          }
           if ($raw.Length -gt 60000) { $raw = $raw.Substring($raw.Length - 60000) }
           $md = "run: $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID" + "`n`n" + '```text' + "`n" + $raw + "`n" + '```' + "`n"
           $payload = @{ title = "smoke failure $env:GITHUB_RUN_ID"; body = $md } | ConvertTo-Json -Depth 3
