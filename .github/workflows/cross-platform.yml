@@ -117,6 +117,23 @@ jobs:
           # 不需要 checkout/switch/pull —— 之前那串命令连环失败后 `|| exit 0`
           # 直接退出,分支一个都没建成(实测)。
           BR="ci-run/unix-${{ matrix.os }}"
+          # ⚠️ 把 git 的每一步输出都留档:回写失败时,run 日志要鉴权读不到,
+          # **这份 gitlog 是唯一能看到原因的地方**。
+          # (实测:回写步骤报 success,但分支 tip 没更新 → 没有任何线索;
+          #  有了 gitlog,下一次就能直接看到 git 到底说了什么。)
+          g_add=$(git add -A ci 2>&1 || true)
+          g_commit=$(git commit -q -m "ci: record run ${{ github.run_id }} ${{ matrix.os }} [skip ci]" 2>&1 || true)
+          g_push=$(git push --force origin "HEAD:$BR" 2>&1 || true)
+          {
+            echo "# git 回写日志 (run ${{ github.run_id }} ${{ matrix.os }})"
+            echo '```text'
+            echo "--- add ---";   echo "$g_add"
+            echo "--- commit ---"; echo "$g_commit"
+            echo "--- push ---";  echo "$g_push"
+            echo "--- status ---"; git status --short 2>&1 | head -20
+            echo "--- 远端 tip ---"; git ls-remote origin "$BR" 2>&1
+            echo '```'
+          } > "ci/runs/${{ github.run_id }}-${{ matrix.os }}-git.md"
           git add -A ci || true
           git commit -q -m "ci: record run ${{ github.run_id }} ${{ matrix.os }} [skip ci]" || true
           git push --force origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"

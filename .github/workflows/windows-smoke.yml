@@ -90,9 +90,23 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # ⚠️ 任何一步失败都不能中断后续:commit 在「无变更」时返回非零,
           # 一旦因此退出,就**永远走不到 push**,分支一个都建不出来(实测)。
+          BR="ci-run/windows-smoke"
+          g_add=$(git add -A ci 2>&1 || true)
+          g_commit=$(git commit -q -m "ci: record run ${GITHUB_RUN_ID} windows [skip ci]" 2>&1 || true)
+          g_push=$(git push --force origin "HEAD:$BR" 2>&1 || true)
+          {
+            echo "# git 回写日志 (run ${GITHUB_RUN_ID} windows)"
+            echo '```text'
+            echo "--- add ---";   echo "$g_add"
+            echo "--- commit ---"; echo "$g_commit"
+            echo "--- push ---";  echo "$g_push"
+            echo "--- status ---"; git status --short 2>&1 | head -20
+            echo "--- 远端 tip ---"; git ls-remote origin "$BR" 2>&1
+            echo '```'
+          } > "ci/runs/${GITHUB_RUN_ID}-windows-git.md"
           git add -A ci || true
           git commit -q -m "ci: record run ${GITHUB_RUN_ID} windows [skip ci]" || true
-          git push --force origin "HEAD:ci-run/windows-smoke" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
+          git push --force origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
 
       # 失败时把完整日志落到 Issue:公开仓库可经 REST API 无鉴权读取,便于远端诊断
       - name: Publish failure log
