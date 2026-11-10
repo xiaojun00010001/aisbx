@@ -44,7 +44,9 @@ jobs:
       # ⚠️ 此前只跑 `cargo test -p aisbx-policy`,aisbx crate 自身的单测从未进 CI。
       # 用 --workspace 覆盖全部 crate(含 doctest)。
       - name: Unit tests (all crates)
-        run: cargo test --workspace
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee test.log
 
       - name: Build
         run: cargo build --bins --example burn
@@ -73,7 +75,7 @@ jobs:
             echo "- job status: ${{ job.status }}"
             echo
             echo '```text'
-            cat smoke.log clippy.log 2>/dev/null | tail -n 400 || true
+            cat smoke.log clippy.log test.log 2>/dev/null | tail -n 400 || true
             echo '```'
           } > "$out"
           cp "$out" ci/last-run.md
@@ -126,6 +128,7 @@ jobs:
       - name: Cargo check all targets
         run: cargo check --all-targets
       - name: Capability report
+        run: cargo run --quiet --bin aisbx -- capabilities
 
       - name: Publish run result to repo
         if: always()
@@ -143,7 +146,7 @@ jobs:
             echo "- job status: ${{ job.status }}"
             echo
             echo '```text'
-            cat clippy.log 2>/dev/null | tail -n 200 || true
+            cat clippy.log test.log 2>/dev/null | tail -n 200 || true
             echo '```'
           } > "$out"
           cp "$out" ci/last-run.md
@@ -152,4 +155,3 @@ jobs:
           git add ci
           git commit -q -m "ci: record run ${{ github.run_id }} windows-check [skip ci]" || exit 0
           git push || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志"
-        run: cargo run --quiet --bin aisbx -- capabilities

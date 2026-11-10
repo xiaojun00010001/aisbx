@@ -23,7 +23,10 @@ jobs:
 
       # Windows 侧此前从未跑过 cargo test:单测只在 Unix 侧执行过。
       - name: Unit tests (all crates)
-        run: cargo test --workspace
+        shell: pwsh
+        run: |
+          cargo test --workspace 2>&1 | Tee-Object -FilePath test.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Smoke (AppContainer + Job + token 闭环, 18 项断言)
         shell: pwsh
@@ -44,7 +47,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path ci/runs | Out-Null
           $raw = ""
-          foreach ($f in @("smoke.log")) {
+          foreach ($f in @("smoke.log", "test.log")) {
             if (Test-Path $f) { $raw += (Get-Content $f -Raw) }
           }
           if ($raw.Length -gt 40000) { $raw = $raw.Substring($raw.Length - 40000) }
@@ -56,6 +59,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ci
           git commit -q -m "ci: record run $env:GITHUB_RUN_ID windows [skip ci]"
+          if ($LASTEXITCODE -ne 0) { Write-Host "::notice::commit 失败,回写跳过"; exit 0 }
           git push
           if ($LASTEXITCODE -ne 0) { Write-Host "::notice::结果回写失败(分支可能受保护),请看 run 日志" }
 
