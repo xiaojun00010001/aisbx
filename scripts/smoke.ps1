@@ -710,6 +710,9 @@ try {
     # 契约检查是**纯文件处理**(秒级),不需要超时保护;
     # 用 PS 原生调用 + @cArgs 展开 → 输出同时进 console 与 check.out
     # (失败详情不会再整个丢)。
+    # ⚠️ 双保险:Windows 的 python 默认 stdout 是 cp1252 → 打印中文会崩
+    # (契约检查已在脚本内 reconfigure,这里再兜一层)
+    $env:PYTHONIOENCODING = "utf-8"
     $cpChkOut = Join-Path $cp "check.out"
     # ⚠️ $cArgs 里**已经**含脚本路径,这里不能再写一遍
     # (写重了 → python 收到两份 → argparse 报 "unrecognized arguments",exit=2)

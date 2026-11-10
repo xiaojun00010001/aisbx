@@ -21,6 +21,16 @@ import json
 import os
 import sys
 
+# ⚠️ Windows 的 python 默认 stdout 编码是 **cp1252**(系统 ANSI 代码页),
+# 打印中文直接 UnicodeEncodeError → 契约检查在第一步 `print("== 能力报告 ==")`
+# 就崩掉 → **输出与报告全丢**,只留下一个 exit=1,
+# 此前一直误判成「三平台不一致」(实测踩过)。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 FAILURES = []
 CHECKS = 0
 REPORT_OUT = ""
