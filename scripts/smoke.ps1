@@ -621,10 +621,7 @@ try {
     # ⚠️ 不用 `Start-Process -RedirectStandardOutput`:那条路在 CI 的短路径
     # (RUNNER~1)下会报 "The filename, directory name, or volume label syntax
     # is incorrect."(实测踩过)。改用 cmd 的重定向(cmd 自己解析路径)。
-    $t15cmd = '{0} run -p {1} -- {2} spoof {3} {4} > {5} 2> {6}' -f `
-      $bin, $p15, "$ws\burn.exe", $t15claimed, $t15actual, $t15out, $t15err
-    $proc15 = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru `
-      -ArgumentList @('/c', $t15cmd)
+    & $bin run -p $p15 -- "$ws\burn.exe" spoof $t15claimed $t15actual > $t15out 2> $t15err
     for ($i = 0; $i -lt 150; $i++) {
       if ((Test-Path $a15) -and (Select-String -Path $a15 -Pattern 't15claimed' -Quiet)) { break }
       Start-Sleep -Milliseconds 200
@@ -648,7 +645,6 @@ try {
       (-not ($a15txt -match 't15actual' -and $a15txt -match '"source":"sandbox-log"'))
     # 只授权【自称】路径 → 重跑 → 真实路径仍必须写不动
     & $bin authorize -p $p15 --path $t15claimed --access write 2>&1 | Out-Null
-    if (-not $proc15.WaitForExit(60000)) { $proc15.Kill() }
     Assert "T15c 授权自称路径后真实路径仍被拒(伪造不构成越权)" `
       (-not (Test-Path $t15actual))
     } catch {
@@ -686,12 +682,13 @@ try {
     # ⚠️ 不用 `Start-Process -RedirectStandardOutput`:那条路在 CI 的短路径
     # (RUNNER~1)下会报 "The filename, directory name, or volume label syntax
     # is incorrect."(实测踩过)。改用 cmd 的重定向(cmd 自己解析路径)。
-    $cmdline = '{0} run -p {1} -- {2} stderrdeny {3} > {4} 2> {5}' -f `
-      $bin, $cpp, "$wsurn.exe", (Join-Path $out "contract.txt"), $cpe, (Join-Path $cp "run.err")
-    $pRun = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru `
-      -ArgumentList @('/c', $cmdline)
-    if (-not $pRun.WaitForExit(60000)) { $pRun.Kill(); Write-Host "::notice::契约用的 run 超时,已终止" }
-    $cpRc = $pRun.ExitCode
+    # ⚠️ 一律用 **PowerShell 原生调用 + 原生重定向**(脚本其余部分本来就这么写):
+    #   - cmd /c:引号会被吃掉、参数被拆坏(实测 → 事件流一直是坏的)
+    #   - Start-Process -Redirect*:CI 的短路径(RUNNER~1)下直接报错(实测)
+    # PS 原生重定向由 PowerShell 自己处理路径,含空格的路径也会自动加引号。
+    $cpErr = Join-Path $cp "run.err"
+    & $bin run -p $cpp --json -- "$ws\burn.exe" stderrdeny (Join-Path $out "contract.txt") > $cpe 2> $cpErr
+    $cpRc = $LASTEXITCODE
 
     Push-Progress "contract/check"
     # 平台名取自能力报告的 backend(不写死):契约基线按平台给期望值,
@@ -710,17 +707,13 @@ try {
           '--audit', $cpa,
           '--exit-code', "$cpRc",
           '--out', $cpReport)
-        # ⚠️ 直接跑 python,**不经 cmd /c**:cmd 的参数传递与重定向在 CI 里不可靠
-        # (实测:输出文件根本没生成 → 失败详情全丢,只能靠猜)。
-        # 报告由 python 自己写(--out)→ 不依赖任何 shell 重定向。
-        $pChk = Start-Process -FilePath "python" -NoNewWindow -PassThru -ArgumentList $cArgs
-        if (-not $pChk.WaitForExit(30000)) {
-          $pChk.Kill()
-      Write-Host "::notice::契约检查超时,已终止"
-      Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" $false
-    } else {
-      Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" ($pChk.ExitCode -eq 0)
-    }
+    # 契约检查是**纯文件处理**(秒级),不需要超时保护;
+    # 用 PS 原生调用 + @cArgs 展开 → 输出同时进 console 与 check.out
+    # (失败详情不会再整个丢)。
+    $cpChkOut = Join-Path $cp "check.out"
+    & python scripts/contract_check.py @cArgs 2>&1 | Tee-Object -FilePath $cpChkOut
+    $cpChkRc = $LASTEXITCODE
+    Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" ($cpChkRc -eq 0)
   }
 }
 finally {
