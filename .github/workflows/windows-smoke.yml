@@ -31,6 +31,9 @@ jobs:
       # ── 主验证:冒烟先跑 ────────────────────────────────────────────
       - name: Smoke (AppContainer + Job + token 闭环, 46 项断言)
         shell: pwsh
+        env:
+          # 段级进度回写要往仓库 push → 需要 token
+          GH_TOKEN: ${{ github.token }}
         run: |
           & .\scripts\smoke.ps1 *>&1 | Tee-Object -FilePath smoke.log
           $code = $LASTEXITCODE

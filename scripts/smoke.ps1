@@ -31,6 +31,31 @@ function Assert($name, $cond) {
 }
 function Warn($name) { Write-Host "  WARN  $name" -ForegroundColor Yellow }
 
+# 段级进度回写:每进入一个 T 段就把「开始哪一段」推进仓库。
+#
+# 为什么要它:Windows 冒烟整轮要十几分钟,而 CI 日志我读不到(未认证 API
+# 配额有限、job 日志需鉴权)—— 一旦某段卡死(无界等待),job 会被 cancel,
+# 连 always 的回写都不执行,结果就是「Windows 这条链完全是盲的」。
+# 有了它,卡住时仓库里最后一条进度就是卡住的那一段。
+function Push-Progress($stage) {
+  try {
+    $dir = Join-Path $repo "ci/runs"
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $f = Join-Path $dir "windows-progress.md"
+    Add-Content -Path $f -Value ("- {0} @ {1}" -f $stage, (Get-Date -Format HH:mm:ss)) -Encoding UTF8
+    git config user.name "github-actions[bot]"
+    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    git add ci/runs/windows-progress.md
+    git commit -q -m "ci: windows smoke progress $stage [skip ci]"
+    if ($LASTEXITCODE -ne 0) { return }
+    git checkout main 2>&1 | Out-Null
+    git pull --rebase origin main 2>&1 | Out-Null
+    git push origin HEAD:main 2>&1 | Out-Null
+  } catch {
+    # 进度回写是尽力而为,失败不能影响冒烟本身
+  }
+}
+
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
@@ -63,11 +88,13 @@ $p1    = Join-Path $root "p1.json"
 
 try {
   # ── T0 策略合法性 ────────────────────────────────────────────────
+  Push-Progress "T0"
   Write-Host "[$(Get-Date -Format HH:mm:ss)] == T0 策略 =="
   & $bin policy-check -p $p1
   Assert "T0 策略解析与校验" ($LASTEXITCODE -eq 0)
 
   # ── T1 文件默认隔离 ──────────────────────────────────────────────
+  Push-Progress "T1"
   Write-Host "[$(Get-Date -Format HH:mm:ss)] == T1 文件默认隔离 =="
   & $bin run -p $p1 -- "$ws\burn.exe" write "$out\f1.txt"
   Assert "T1a 白名单外写入被拒(退出码非 0)" ($LASTEXITCODE -ne 0)
@@ -77,6 +104,7 @@ try {
 
   # ── T2 token 授权闭环 ────────────────────────────────────────────
   # broker 生命周期 = 一次 run,故 token 必须在 run 存活期间由宿主签发。
+  Push-Progress "T2"
   Write-Host "[$(Get-Date -Format HH:mm:ss)] == T2 token 授权闭环 =="
   # T2a: deny 模式下无 token 提权必须失败
   & $bin run -p $p1 -- "$ws\aisbx.exe" escalate -p $p1 --path "$out\f2.txt" --access write
@@ -120,6 +148,7 @@ try {
   Assert "T2f deny_escalation 优先于 token" ($r2 -match "escalate=(?!0)\d+")
 
   # ── T3 资源限制 ──────────────────────────────────────────────────
+  Push-Progress "T3"
   Write-Host "[$(Get-Date -Format HH:mm:ss)] == T3 资源限制(单进程 64MB / 全任务 256MB / 进程数 10) =="
   & $bin run -p $p1 -- "$ws\burn.exe" mem 32
   Assert "T3a 配额内分配成功" ($LASTEXITCODE -eq 0)
@@ -130,6 +159,7 @@ try {
 
   # ── T4 网络 ──────────────────────────────────────────────────────
   if (-not $SkipNetwork) {
+    Push-Progress "T4"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T4 网络(loopback=true / internet=false) =="
     $port = 47000 + (Get-Random -Maximum 2000)
     $job = Start-Job -ScriptBlock {
@@ -147,6 +177,7 @@ try {
   }
 
   # ── T5 审计断言 ──────────────────────────────────────────────────
+  Push-Progress "T5"
   Write-Host "[$(Get-Date -Format HH:mm:ss)] == T5 审计 =="
   $events = Get-Content $audit | ForEach-Object { ($_ | ConvertFrom-Json).event }
   Assert "T5a token.issued 已落审计" ($events -contains "token.issued")
@@ -158,6 +189,7 @@ try {
   if (-not $isAdmin) {
     Warn "T6 非管理员:CheckNetIsolation 回环例外可能不可用,跳过网络代理断言"
   } else {
+    Push-Progress "T6"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T6 网络代理(P0) =="
     $p6 = Join-Path $root "p6.json"
     $a6 = Join-Path $root "p6.audit.jsonl"
@@ -197,6 +229,7 @@ try {
     Assert "T6d net.grant 已落审计" ((Test-Path $a6) -and (Select-String -Path $a6 -Pattern '"event":"net.grant"' -Quiet))
 
     # ── T8 SOCKS5:同一端口按首字节分流 ───────────────────────────────
+    Push-Progress "T8"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T8 SOCKS5 =="
     $p8 = Join-Path $root "p8.json"
     $a8 = Join-Path $root "p8.audit.jsonl"
@@ -238,6 +271,7 @@ try {
     # 单独兜底:任何 PowerShell 异常都要落到断言计数,不能让脚本静默中断
     # (否则 CI 只会看到 exit 1,日志里连 SMOKE_DONE 都没有)。
     try {
+    Push-Progress "T9"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T9 契约边界与安全断言 =="
     $p9 = Join-Path $root "p9.json"; $a9 = Join-Path $root "p9.audit.jsonl"
     @{
@@ -323,6 +357,7 @@ try {
 
     # ── T10 能力契约组(C07/C19/C20/C22) ─────────────────────────────
     try {
+    Push-Progress "T10"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T10 能力契约组 =="
     $p10 = Join-Path $root "p10.json"; $a10 = Join-Path $root "p10.audit.jsonl"
     @{
@@ -387,6 +422,7 @@ try {
     # 会把路径拼进异常消息("Access to the path 'X' is denied.")。
     # L1 补上「该放行谁」,让 in-place 放行精确到单个路径,而不是整条命令豁免。
     try {
+    Push-Progress "T11"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T11 L1:程序自报路径(stderr) =="
     $p11 = Join-Path $root "p11.json"; $a11 = Join-Path $root "p11.audit.jsonl"
     @{
@@ -431,6 +467,7 @@ try {
     # → launcher 等宿主授权 → 把该路径并入策略快照(落 ACL)→ 重跑 → 成功。
     # 与 Unix 侧 B 契约闭环一致:**重跑是主线**,in-place 只是 legacy 加速路径。
     try {
+    Push-Progress "T12"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T12 B 契约:授权后重跑 =="
     $p12 = Join-Path $root "p12.json"; $a12 = Join-Path $root "p12.audit.jsonl"
     @{
@@ -472,6 +509,7 @@ try {
     # probe2 在一次 run 内先试 new(被拒→L1 采集→授权→重跑)、再试 existing:
     # 授权后 new 应创建成功,而 existing 必须仍写不动、内容不变。
     try {
+    Push-Progress "T13"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T13 授权粒度不外溢 =="
     $p13 = Join-Path $root "p13.json"; $a13 = Join-Path $root "p13.audit.jsonl"
     @{
@@ -515,6 +553,7 @@ try {
     # agent 是靠 `aisbx status` 拿「要放行哪个路径」的 → 这条交互必须
     # 三平台都有,且给出的信息形态一致(Unix 侧 T14a/b/c 同款)。
     try {
+    Push-Progress "T14"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T14 status 交互 =="
     $p14 = Join-Path $root "p14.json"; $a14 = Join-Path $root "p14.audit.jsonl"
     @{
@@ -550,6 +589,7 @@ try {
     # spoof 先真的写 actual(被内核拒绝),再向 stderr 打印一个自称的 claimed。
     # 要验的是:授权**自称**路径后,**真实**路径仍写不动 → 伪造换不来越权。
     try {
+    Push-Progress "T15"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == T15 对抗:自称路径 vs 真实路径 =="
     $p15 = Join-Path $root "p15.json"; $a15 = Join-Path $root "p15.audit.jsonl"
     @{
