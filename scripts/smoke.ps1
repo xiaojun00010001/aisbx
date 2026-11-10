@@ -606,8 +606,19 @@ try {
 
     $t15claimed = Join-Path $out "t15claimed.txt"
     $t15actual  = Join-Path $out "t15actual.txt"
-    $proc15 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
-      -ArgumentList @('run','-p',$p15,'--',"$ws\burn.exe",'spoof',$t15claimed,$t15actual)
+    $t15out = Join-Path $root "t15.out"
+    $t15err = Join-Path $root "t15.err"
+    # ⚠️ aisbx 会**捕获**子进程的 stdout/stderr 供 L1 采集,不会转发到 console
+    # → 采集到底采没采到、burn 到底输出了什么,全都看不到(实测 T15a 失败时
+    # 只能看到「审计里啥都没有」,无法区分「没采到」与「burn 没输出」)。
+    # 这里用 cmd 重定向把 aisbx 自己的输出落盘 → 下轮直接可读。
+    # ⚠️ 不用 `Start-Process -RedirectStandardOutput`:那条路在 CI 的短路径
+    # (RUNNER~1)下会报 "The filename, directory name, or volume label syntax
+    # is incorrect."(实测踩过)。改用 cmd 的重定向(cmd 自己解析路径)。
+    $t15cmd = '"{0}" run -p "{1}" -- "{2}" spoof "{3}" "{4}" > "{5}" 2> "{6}"' -f `
+      $bin, $p15, "$ws\burn.exe", $t15claimed, $t15actual, $t15out, $t15err
+    $proc15 = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru `
+      -ArgumentList @('/c', $t15cmd)
     for ($i = 0; $i -lt 150; $i++) {
       if ((Test-Path $a15) -and (Select-String -Path $a15 -Pattern 't15claimed' -Quiet)) { break }
       Start-Sleep -Milliseconds 200
@@ -616,6 +627,13 @@ try {
     # 审计打进日志:T15a 失败时能直接看到实际采到了什么(路径形态/来源/精度)
     Write-Host "----- T15 审计 -----"
     Write-Host $a15txt
+    # 子进程与宿主两侧的原始输出也打进日志(诊断用):
+    foreach ($f in @($t15out, $t15err)) {
+      if (Test-Path $f) {
+        Write-Host "----- $(Split-Path -Leaf $f) -----"
+        Write-Host ((Get-Content $f -Raw))
+      }
+    }
     Assert "T15a 采到自称路径且精度为 reported" `
       (($a15txt -match 't15claimed') -and ($a15txt -match '"precision":"reported"'))
     # ⚠️ 只排除**内核通道**采到的条目:策略感知(source=explicit)也会记下
@@ -673,24 +691,18 @@ try {
     # 平台名取自能力报告的 backend(不写死):契约基线按平台给期望值,
     # 写死会在平台间张冠李戴(实测 macOS 被 Linux 的期望判失败)。
     $cpPlatform = (Get-Content "$cp\caps.json" -Raw | ConvertFrom-Json).backend
-    $cArgs = @('scripts/contract_check.py',
-      '--caps', "$cp\caps.json",
-      '--baseline', 'scripts/contract-baseline.json',
-      '--platform', $cpPlatform,
-      '--events', $cpe,
-      '--audit', $cpa,
-      '--exit-code', "$cpRc")
-    # 输出继承控制台(不重定向)→ 避开上面那条路径坑;只看退出码
-    # 报告落进回写目录:契约检查的输出继承控制台,而 Issue 只带 smoke.log →
-    # 失败详情会丢;落盘才能随结果一起被读到。
-    # 报告落进回写目录:契约检查的输出继承控制台,而 Issue 只带 smoke.log →
-    # 失败详情会丢;落盘才能随结果一起被读到。
-    # ⚠️ 用**绝对路径** + --out(--out 之前是**死参数**:声明了却从不生效 →
-    # Windows 侧契约报告一直没生成,失败详情只能靠猜)。
+    # ⚠️ 契约检查的输出**继承控制台**时不进 smoke.log → 失败详情整个丢
+    # (实测:报告没生成 + 输出也不可见 → 只能靠猜)。
+    # 现在两样都落盘:报告(--out)+ 控制台输出(check.out)→ 下轮直接可读。
+    # ⚠️ 用 cmd 重定向(不用 Start-Process -Redirect*:CI 短路径下会报错,实测踩过)。
+    # cmd /c 会把子进程退出码作为自己的退出码 → $pChk.ExitCode 仍是检查结果 ✓
     $cpReport = Join-Path $repo "ci/runs/contract-$cpPlatform.md"
+    $cpChkOut = Join-Path $cp "check.out"
     New-Item -ItemType Directory -Force -Path (Join-Path $repo "ci/runs") | Out-Null
-    $cArgs += @('--out', $cpReport)
-    $pChk = Start-Process -FilePath "python" -NoNewWindow -PassThru -ArgumentList $cArgs
+    $cpChkCmd = 'python scripts/contract_check.py --caps "{0}" --baseline scripts/contract-baseline.json --platform {1} --events "{2}" --audit "{3}" --exit-code {4} --out "{5}" > "{6}" 2>&1' -f `
+      "$cp\caps.json", $cpPlatform, $cpe, $cpa, $cpRc, $cpReport, $cpChkOut
+    $pChk = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru -ArgumentList @('/c', $cpChkCmd)
+    if (Test-Path $cpChkOut) { Write-Host ((Get-Content $cpChkOut -Raw)) }
     if (-not $pChk.WaitForExit(30000)) {
       $pChk.Kill()
       Write-Host "::notice::契约检查超时,已终止"
