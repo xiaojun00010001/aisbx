@@ -52,6 +52,10 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
         Some("status") => cmd_status(rest_after(args, 1)),
         Some("__linux_helper") => {
             #[cfg(target_os = "linux")]
+            // 该平台上这个 return 确实是多余的(后面没有别的分支了),
+            // 但它同时也是「Linux 专属分支」的必要写法 —— 保留语义,
+            // 只豁免 lint:本机(macOS)无法编译验证 Linux 分支,改控制流风险太高。
+            #[allow(clippy::needless_return)]
             {
                 return linux::helper::linux_helper(rest_after(args, 1));
             }
@@ -142,6 +146,7 @@ fn cmd_run(args: &[String]) -> Result<i32, String> {
         crate::run::run_windows(&policy, &policy_file, &cmd, json)
     }
     #[cfg(target_os = "linux")]
+    #[allow(clippy::needless_return)] // 同上:保留语义,只豁免 lint
     {
         return linux::run_linux(&policy, &policy_file, &cmd, json);
     }

@@ -84,6 +84,9 @@ fn stat_pgrp(stat: &str) -> Option<u32> {
 }
 
 /// 合并多个 PID 来源并去重排序。
+/// ⚠️ 只有 macOS 的内核日志通道(L2)需要合并进程树 → 在只有 L1 的平台
+/// (Linux)上无人调用。显式豁免,而不是删掉:它是 L2 归属判据的一部分。
+#[allow(dead_code)]
 pub fn merge_pids(groups: &[&[u32]]) -> Vec<u32> {
     let set: BTreeSet<u32> = groups.iter().flat_map(|g| g.iter().copied()).collect();
     set.into_iter().collect()
@@ -96,6 +99,8 @@ pub fn merge_pids(groups: &[&[u32]]) -> Vec<u32> {
 /// 递归注册也永远慢一步)。但 fork 会继承 pgid,所以只要违规进程**还活着**,
 /// 就能用 pgid 精确判定它属于本次沙箱——与层级深度无关。
 #[cfg(target_os = "macos")]
+/// ⚠️ 同上:pid→pgid 反查是 L2 的兜底归属判据,只在 macOS 上被调用。
+#[allow(dead_code)]
 pub fn pgid_table() -> std::collections::HashMap<u32, u32> {
     let out = std::process::Command::new("/bin/ps")
         .args(["-axo", "pid=,pgid="])

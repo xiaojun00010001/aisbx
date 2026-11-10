@@ -221,6 +221,8 @@ pub struct SpawnOutcome {
     /// fork 继承 pgid,故它覆盖整棵进程树——内核违规日志上报的是真正执行违规的
     /// 那个进程的 PID(实测:入口 64904,日志里 64905=入口 fork 出的子 shell),
     /// 只按入口 PID 归属会漏掉所有子孙进程。
+    /// 进程树快照。⚠️ 只有 macOS 内核通道(L2)会读它 → Linux 上无人读取。
+    #[allow(dead_code)]
     pub tree: Vec<u32>,
     /// L1 通道:程序自称的被拒路径。**必须在 kill 进程组之后**接收——
     /// 之前管道还没 EOF(孙进程也持有 stderr),会白等。
