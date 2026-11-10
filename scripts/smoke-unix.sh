@@ -600,6 +600,13 @@ if [[ -z "$PROBE" ]]; then
 else
   pass "T11c 该平台有内核通道,精度可为 exact"
 fi
+# T11d:采集到的路径正确。只比**尾部**(目录名+文件名):程序自报的是原样路径
+# (CI 上可能是短路径),规范化后的是长路径,JSON 里还要再转义一层 ——
+# 三种形态并存,只有尾部是稳定判据(与 Windows 侧同口径)。
+T11LEAF=$(basename "$OUT/t11.txt")
+T11DIR=$(basename "$OUT")
+assert "T11d 采集到的路径正确" \
+  bash -c "grep 't11\\.txt' '$A11' | grep -q '$T11DIR[\\\\/]*$T11LEAF'"
 "$BIN" authorize -p "$P11" --path "$OUT" --access write >>"$LOG" 2>&1
 wait "$T11_PID"
 cat "$ROOT/t11.out" >> "$LOG"
@@ -686,6 +693,72 @@ wait "$T15_PID"
 assert "T15c 授权自称路径后真实路径仍被拒(伪造不构成越权)" \
   bash -c "! test -f '$ACTUAL'"
 cat "$ROOT/t15.out" >> "$LOG"
+
+# ── T12 B 契约:授权后重跑(launcher retry)─────────────────────────
+# 沙箱内程序写白名单外的路径 → 被拒(stderr 含路径)→ L1 采集 → 置 needs-approval
+# → launcher 等宿主授权 → 把该路径并入策略快照 → **重跑** → 成功。
+# 与 Windows 侧 T12 同语义(那边是 AppContainer + ACL)。
+echo "[$(date +%H:%M:%S)] == T12 B 契约:授权后重跑 ==" | tee -a "$LOG"
+P12="$ROOT/p12.json"; A12="$ROOT/p12.audit.jsonl"; TASK12="smoke12-$$"
+python3 - "$P12" "$WS" "$A12" "$TASK12" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PY
+T12TARGET="$OUT/t12.txt"
+"$BIN" run -p "$P12" --json -- /bin/sh -c "echo hi > $T12TARGET" >"$ROOT/t12.out" 2>&1 &
+T12_PID=$!
+for _ in $(seq 1 150); do
+  grep -q 'needs-approval' "$A12" 2>/dev/null && break
+  sleep 0.2
+done
+"$BIN" authorize -p "$P12" --path "$T12TARGET" --access write >>"$LOG" 2>&1
+wait "$T12_PID"; T12_RC=$?
+cat "$ROOT/t12.out" >> "$LOG" 2>/dev/null || true
+assert "T12a 授权后重跑成功" test "$T12_RC" -eq 0
+assert "T12b 文件真实落盘" test -f "$T12TARGET"
+assert "T12c retry 事件已落审计" grep -q '"event":"retry"' "$A12"
+
+# ── T13 授权粒度:不外溢 ────────────────────────────────────────────
+# 用户同意的是「创建这一个文件」;若实现对父目录授 Modify,授权范围就悄悄
+# 扩大到整个目录 —— 这是真实的越权面。probe2 先试新建(被拒→采集→授权→
+# 重跑),再试同目录既有文件:授权后新的能建,旧的必须仍写不动、内容不变。
+echo "[$(date +%H:%M:%S)] == T13 授权粒度不外溢 ==" | tee -a "$LOG"
+P13="$ROOT/p13.json"; A13="$ROOT/p13.audit.jsonl"; TASK13="smoke13-$$"
+python3 - "$P13" "$WS" "$A13" "$TASK13" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PY
+T13NEW="$OUT/t13new.txt"; T13OLD="$OUT/t13old.txt"
+echo "orig" > "$T13OLD"
+"$BIN" run -p "$P13" -- "$BURN" probe2 "$T13NEW" "$T13OLD" >"$ROOT/t13.out" 2>&1 &
+T13_PID=$!
+for _ in $(seq 1 150); do
+  grep -q 'needs-approval' "$A13" 2>/dev/null && break
+  sleep 0.2
+done
+"$BIN" authorize -p "$P13" --path "$T13NEW" --access write >>"$LOG" 2>&1
+wait "$T13_PID"
+cat "$ROOT/t13.out" >> "$LOG" 2>/dev/null || true
+assert "T13a 授权后新文件创建成功" grep -q "NEW_CREATED" "$ROOT/t13.out"
+assert "T13b 授权粒度不外溢(同目录既有文件仍不可写)" \
+  bash -c "grep -q 'EXISTING_DENIED' '$ROOT/t13.out' && ! grep -q 'EXISTING_WRITEABLE' '$ROOT/t13.out'"
+assert "T13c 既有文件内容未被改动" grep -q "orig" "$T13OLD"
 
 # ── 跨平台契约检查(与 Windows **共用同一份** contract_check.py 与基线)──
 # 目的是保证「三个环境的表现形式与交互一样」:能力报告的键集合、

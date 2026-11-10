@@ -511,6 +511,82 @@ try {
       $script:fail++
     }
 
+    # ── T14 status:agent 查询待授权信息 ──────────────────────────────
+    # agent 是靠 `aisbx status` 拿「要放行哪个路径」的 → 这条交互必须
+    # 三平台都有,且给出的信息形态一致(Unix 侧 T14a/b/c 同款)。
+    try {
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T14 status 交互 =="
+    $p14 = Join-Path $root "p14.json"; $a14 = Join-Path $root "p14.audit.jsonl"
+    @{
+      task       = "smoke14-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{}
+      broker     = @{ audit_log = $a14; violation_capture = $true }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p14 -Encoding UTF8
+
+    $t14target = Join-Path $out "t14.txt"
+    $proc14 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -ArgumentList @('run','-p',$p14,'--',"$ws\burn.exe",'stderrdeny',$t14target)
+    for ($i = 0; $i -lt 150; $i++) {
+      if ((Test-Path $a14) -and (Select-String -Path $a14 -Pattern 'needs-approval' -Quiet)) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    $st14 = (& $bin status -p $p14 | Out-String)
+    # 只比尾部:短/长路径形态在 Windows 上并存(8.3 短路径 vs canonicalize 后的长路径)
+    $t14leaf = Split-Path $t14target -Leaf
+    Assert "T14a status 给出待授权的具体路径" ($st14 -match [regex]::Escape($t14leaf))
+    Assert "T14b status 标注路径精度与归属" ($st14 -match 'reported|exact')
+    Assert "T14c status 报告 needs_approval 标志" ($st14 -match 'needs[-_]approval')
+    if (-not $proc14.WaitForExit(20000)) { $proc14.Kill() }
+    } catch {
+      Warn "T14 段异常: $_"
+      $script:rows += "| T14 段异常(未跑完) | **FAIL** |"
+      $script:fail++
+    }
+
+    # ── T15 对抗:程序自称路径 ≠ 它真正要的路径 ───────────────────────
+    # spoof 先真的写 actual(被内核拒绝),再向 stderr 打印一个自称的 claimed。
+    # 要验的是:授权**自称**路径后,**真实**路径仍写不动 → 伪造换不来越权。
+    try {
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T15 对抗:自称路径 vs 真实路径 =="
+    $p15 = Join-Path $root "p15.json"; $a15 = Join-Path $root "p15.audit.jsonl"
+    @{
+      task       = "smoke15-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "deny" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{}
+      broker     = @{ audit_log = $a15; violation_capture = $true }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p15 -Encoding UTF8
+
+    $t15claimed = Join-Path $out "t15claimed.txt"
+    $t15actual  = Join-Path $out "t15actual.txt"
+    $proc15 = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+      -ArgumentList @('run','-p',$p15,'--',"$ws\burn.exe",'spoof',$t15claimed,$t15actual)
+    for ($i = 0; $i -lt 150; $i++) {
+      if ((Test-Path $a15) -and (Select-String -Path $a15 -Pattern 't15claimed' -Quiet)) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    $a15txt = if (Test-Path $a15) { Get-Content $a15 -Raw } else { "" }
+    Assert "T15a 采到自称路径且精度为 reported" `
+      (($a15txt -match 't15claimed') -and ($a15txt -match '"precision":"reported"'))
+    # ⚠️ 只排除**内核通道**采到的条目:策略感知(source=explicit)也会记下
+    # 这个路径,那是正常行为,不是「采到了真实路径」。
+    Assert "T15b 未采到从未被拒的真实路径" `
+      (-not ($a15txt -match 't15actual' -and $a15txt -match '"source":"sandbox-log"'))
+    # 只授权【自称】路径 → 重跑 → 真实路径仍必须写不动
+    & $bin authorize -p $p15 --path $t15claimed --access write 2>&1 | Out-Null
+    if (-not $proc15.WaitForExit(60000)) { $proc15.Kill() }
+    Assert "T15c 授权自称路径后真实路径仍被拒(伪造不构成越权)" `
+      (-not (Test-Path $t15actual))
+    } catch {
+      Warn "T15 段异常: $_"
+      $script:rows += "| T15 段异常(未跑完) | **FAIL** |"
+      $script:fail++
+    }
+
     # ── 跨平台契约检查(与 Unix **共用同一份** contract_check.py 与基线)──
     # 目的是保证「三个环境的表现形式与交互一样」:能力报告的键集合、
     # --json 事件流的事件名、审计事件类型、退出码语义,三平台必须一致。
