@@ -41,6 +41,11 @@ const DENY_MARKERS: &[&str] = &[
     "EACCES",
     "EPERM",
     "not permitted",
+    // Linux(bwrap):白名单外目录被 bind 成只读时,**新建**文件得到的是
+    // EROFS(Read-only file system),而不是 EACCES——两种形态都要能识别,
+    // 否则 L1 在 Linux 上会整段失效(macOS 上有内核通道兜住,不易暴露)。
+    "Read-only file system",
+    "read-only file system",
     // Windows
     "Access is denied",
     "access is denied",
@@ -249,6 +254,16 @@ mod tests {
         assert_eq!(extract_denied_path(line), None);
         let line2 = "python3: error: couldn't create cache file '/tmp/xcrun_db-abc' (errno=Operation not permitted)";
         assert_eq!(extract_denied_path(line2), None);
+    }
+
+    #[test]
+    fn recognizes_readonly_filesystem_denial() {
+        // Linux bwrap:白名单外目录只读 → 新建文件报 EROFS
+        let line = "sh: /tmp/x/out.txt: Read-only file system";
+        assert_eq!(
+            extract_denied_path(line),
+            Some("/tmp/x/out.txt".to_string())
+        );
     }
 
     #[test]

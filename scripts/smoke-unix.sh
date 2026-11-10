@@ -181,8 +181,13 @@ cat "$T6_OUT" >> "$LOG"
 
 echo "[$(date +%H:%M:%S)] == T7 内核违规日志自动采集(按能力报告判定) ==" | tee -a "$LOG"
 CAP_JSON=$("$BIN" capabilities 2>>"$LOG")
+# ⚠️ 判据必须是「内核日志通道(L2)是否存在」,而不是 auto_violation_capture:
+# 后者在只有 L1(stderr 自报)的平台上同样是 full/partial,而本段的断言
+# 全是 L2 专属(violation.captured / source=sandbox-log)——判据与断言不匹配
+# 就会在 Linux 上整段误跑并全红(实测 CI 如此)。
 AUTO_CAP=$(printf '%s' "$CAP_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["capabilities"]["auto_violation_capture"])' 2>/dev/null)
-if [[ "$AUTO_CAP" == "full" || "$AUTO_CAP" == "partial" ]]; then
+L2_PROBE=$(printf '%s' "$CAP_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["capabilities"].get("violation_log_probe",""))' 2>/dev/null)
+if [[ -n "$L2_PROBE" ]]; then
   # P1 完整闭环:burn write 不调 escalate、不解析命令,精确路径由内核日志自动给出。
   P7="$ROOT/p7.json"; A7="$ROOT/p7.audit.jsonl"; TASK7="smoke7-$$"
   python3 - "$P7" "$WS" "$A7" "$TASK7" <<'PY'
@@ -558,12 +563,17 @@ json.dump({
     "broker": {"audit_log": audit, "violation_capture": True},
 }, open(policy, "w"), indent=2)
 PY
+# 目标文件**预先存在**:白名单外目录被 bind 成只读时,写「新文件」得到的是
+# EROFS(Read-only file system),写「已存在文件」才是 EACCES(Permission denied)。
+# 两种形态 L1 都要能识别,这里用后者(更贴近「越界写既有文件被拒」)。
+: > "$OUT/t11.txt"
 "$BIN" run -p "$P11" --json -- /bin/sh -c "echo hi > $OUT/t11.txt" >"$ROOT/t11.out" 2>&1 &
 T11_PID=$!
 for _ in $(seq 1 150); do
   grep 't11\.txt' "$A11" 2>/dev/null | grep -q '"event":"violation' && break
   sleep 0.2
 done
+cat "$ROOT/t11.out" >> "$LOG" 2>/dev/null || true
 assert "T11a 越界路径被采集(内核日志或 stderr 自报)" bash -c "grep 't11\.txt' '$A11' | grep -q '\"event\":\"violation\"'"
 T11_PREC=$(python3 -c 'import json,sys
 for ln in open(sys.argv[1]):
