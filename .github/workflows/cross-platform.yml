@@ -106,7 +106,7 @@ jobs:
           # ⚠️ detached HEAD 下 `git push origin HEAD:<branch>` 本来就合法:
           # 不需要 checkout/switch/pull —— 之前那串命令连环失败后 `|| exit 0`
           # 直接退出,分支一个都没建成(实测)。
-          BR="ci-results/unix-${{ matrix.os }}"
+          BR="ci-run/unix-${{ matrix.os }}"
           git add -A ci || true
           git commit -q -m "ci: record run ${{ github.run_id }} ${{ matrix.os }} [skip ci]" || true
           git push origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
@@ -198,7 +198,7 @@ jobs:
           # 独立分支:各 job 各写各的 → 零并发竞争
           # (挤在同一分支上会互相 rebase 冲突 → abort → 结果被挤掉,
           #  实测 Windows 那轮的结果就因此丢了)
-          BR="ci-results/windows-check"
+          BR="ci-run/windows-check"
           git add -A ci || true
           git commit -q -m "ci: record run ${{ github.run_id }} windows-check [skip ci]" || true
           git push origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"

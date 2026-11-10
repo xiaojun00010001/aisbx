@@ -51,7 +51,7 @@ bash scripts/smoke-unix.sh
 CI：`.github/workflows/windows-smoke.yml`（Windows 真机冒烟）与
 `.github/workflows/cross-platform.yml`（ubuntu/macos 真机冒烟 + Windows 编译检查）。
 **三平台真机行为只由 workflow 验证**，本地只做 fmt/clippy/单测 + Windows 交叉编译。
-结果回写到仓库 `ci-results/*` 分支（`git fetch origin 'refs/heads/ci-results/*'`），
+结果回写到仓库 `ci-results/*` 分支（`git fetch origin 'refs/heads/ci-run/*'`），
 不依赖 GitHub API 配额；另有**三平台共用同一份**跨平台契约检查
 （`scripts/contract_check.py` + `scripts/contract-baseline.json`），
 保证能力报告键集合 / 事件名 / 审计事件类型 / 退出码语义在三平台同形。
