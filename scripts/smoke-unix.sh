@@ -788,8 +788,12 @@ CP_RC=$?
 # 两个 runner 上跑,写死 linux 会让 macOS 拿 Linux 的期望去比 → 假失败。
 CP_PLATFORM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['backend'])" "$CP/caps.json")
 mkdir -p ci/runs
+# ⚠️ 不要用 `timeout` 命令:macOS 自带的是 BSD coreutils,**没有 timeout**
+# (只有 gtimeout)→ 命令直接失败 → 契约检查被判 FAIL 且不产生报告文件
+# (实测 macOS 就是这么红的,并非契约不一致)。契约检查是纯文件处理(秒级),
+# 不会卡;Windows 侧另有 Start-Process + WaitForExit 兜底。
 if CONTRACT_REPORT_OUT="ci/runs/contract-$CP_PLATFORM.md" \
-  timeout 60 python3 scripts/contract_check.py \
+  python3 scripts/contract_check.py \
      --caps "$CP/caps.json" \
      --baseline scripts/contract-baseline.json \
      --platform "$CP_PLATFORM" \
