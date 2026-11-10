@@ -31,6 +31,12 @@ function Assert($name, $cond) {
 }
 function Warn($name) { Write-Host "  WARN  $name" -ForegroundColor Yellow }
 
+# ⚠️ cmd /c 对整条命令的引号有自己的规则:**首尾引号会被吃掉**,
+# 引号还会让参数被拆坏 → aisbx 收到错误参数 → 审计为空、事件流无效、
+# 契约检查必然 FAIL(实测 Windows 侧契约检查一直红,根因就在这里)。
+# 所以下面拼 cmd 命令行时**一律不加引号** —— CI 的路径不含空格
+# (RUNNER~1 短路径也是),本地若路径含空格则需要另想办法。
+
 # 段级进度回写:每进入一个 T 段就把「开始哪一段」推进仓库。
 #
 # 为什么要它:Windows 冒烟整轮要十几分钟,而 CI 日志我读不到(未认证 API
@@ -615,7 +621,7 @@ try {
     # ⚠️ 不用 `Start-Process -RedirectStandardOutput`:那条路在 CI 的短路径
     # (RUNNER~1)下会报 "The filename, directory name, or volume label syntax
     # is incorrect."(实测踩过)。改用 cmd 的重定向(cmd 自己解析路径)。
-    $t15cmd = '"{0}" run -p "{1}" -- "{2}" spoof "{3}" "{4}" > "{5}" 2> "{6}"' -f `
+    $t15cmd = '{0} run -p {1} -- {2} spoof {3} {4} > {5} 2> {6}' -f `
       $bin, $p15, "$ws\burn.exe", $t15claimed, $t15actual, $t15out, $t15err
     $proc15 = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru `
       -ArgumentList @('/c', $t15cmd)
@@ -680,7 +686,7 @@ try {
     # ⚠️ 不用 `Start-Process -RedirectStandardOutput`:那条路在 CI 的短路径
     # (RUNNER~1)下会报 "The filename, directory name, or volume label syntax
     # is incorrect."(实测踩过)。改用 cmd 的重定向(cmd 自己解析路径)。
-    $cmdline = '"{0}" run -p "{1}" -- "{2}" stderrdeny "{3}" > "{4}" 2> "{5}"' -f `
+    $cmdline = '{0} run -p {1} -- {2} stderrdeny {3} > {4} 2> {5}' -f `
       $bin, $cpp, "$wsurn.exe", (Join-Path $out "contract.txt"), $cpe, (Join-Path $cp "run.err")
     $pRun = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru `
       -ArgumentList @('/c', $cmdline)
@@ -699,7 +705,7 @@ try {
     $cpReport = Join-Path $repo "ci/runs/contract-$cpPlatform.md"
     $cpChkOut = Join-Path $cp "check.out"
     New-Item -ItemType Directory -Force -Path (Join-Path $repo "ci/runs") | Out-Null
-    $cpChkCmd = 'python scripts/contract_check.py --caps "{0}" --baseline scripts/contract-baseline.json --platform {1} --events "{2}" --audit "{3}" --exit-code {4} --out "{5}" > "{6}" 2>&1' -f `
+    $cpChkCmd = 'python scripts/contract_check.py --caps {0} --baseline scripts/contract-baseline.json --platform {1} --events {2} --audit {3} --exit-code {4} --out {5} > {6} 2>&1' -f `
       "$cp\caps.json", $cpPlatform, $cpe, $cpa, $cpRc, $cpReport, $cpChkOut
     $pChk = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru -ArgumentList @('/c', $cpChkCmd)
     if (Test-Path $cpChkOut) { Write-Host ((Get-Content $cpChkOut -Raw)) }
