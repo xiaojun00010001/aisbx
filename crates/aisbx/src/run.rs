@@ -8,7 +8,8 @@ use windows_sys::Win32::System::Threading::WaitForSingleObject;
 use aisbx_policy::Policy;
 
 use crate::common::expand_all;
-use crate::win::{acl, broker, job, loopback, netproxy, proc, token};
+use crate::win::{acl, audit, broker, job, loopback, netproxy, proc, token};
+use std::sync::{Arc, Mutex};
 
 /// capability SID 常量表(well-known)
 const CAP_INTERNET_CLIENT: &str = "S-1-15-3-1";
@@ -20,9 +21,23 @@ pub fn run_windows(
     cmd: &[String],
     json: bool,
 ) -> Result<i32, String> {
-    let emit = |e: serde_json::Value| {
-        if json {
-            println!("{e}");
+    // 事件**同时落审计**并转发到 stdout(与 Unix 侧一致)。
+    // ⚠️ 之前 Windows 的 emit 只 println → retry 之类的事件从不出现在审计里,
+    // 宿主/agent 无法从审计判断「授权后重跑发生过」(Windows CI 的 T12c 就是
+    // 这么红的:重跑确实发生了,审计里却没有 retry 事件)。
+    // broker 在后面才创建,而 sid/network 事件在它之前就要发 → 用共享槽,
+    // broker 就绪后把审计器填进去。
+    let audit_slot: Arc<Mutex<Option<Arc<audit::Audit>>>> = Arc::new(Mutex::new(None));
+    let emit = {
+        let slot = audit_slot.clone();
+        move |e: serde_json::Value| {
+            let slot = slot.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(a) = slot.as_ref() {
+                a.log(&e);
+            }
+            if json {
+                println!("{e}");
+            }
         }
     };
     let trace = |stage: &str| {
@@ -90,6 +105,10 @@ pub fn run_windows(
     // 7. broker 管道(必须先于进程,沙箱内才能连上)
     trace("stage7 broker");
     let broker = broker::start_server(policy, &package_sid);
+    // broker 就绪 → 把审计器填进 emit 的共享槽(此后的每个事件都落审计)
+    if let Ok(mut slot) = audit_slot.lock() {
+        *slot = Some(broker.audit.clone());
+    }
 
     // 7b. P0 网络代理:宿主回环监听 + 注入代理环境变量。
     //     AppContainer 已有回环例外,沙箱内程序通过 HTTP(S)_PROXY 连到宿主代理,

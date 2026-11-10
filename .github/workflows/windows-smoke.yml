@@ -69,6 +69,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Host "::notice::rebase 失败,回写跳过"; exit 0 }
           git push
           if ($LASTEXITCODE -ne 0) { Write-Host "::notice::结果回写失败(分支可能受保护),请看 run 日志与 Issue" }
+          # 回写是「尽力而为」,失败也不应把这一步判为失败
+          exit 0
 
       # 失败时把完整日志落到 Issue:公开仓库可经 REST API 无鉴权读取,便于远端诊断
       - name: Publish failure log

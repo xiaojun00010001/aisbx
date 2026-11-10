@@ -402,6 +402,9 @@ try {
     & $bin run -p $p11 -- "$ws\burn.exe" stderrdeny $t11target 2>&1 |
       Out-File "$ws\t11.out" -Encoding utf8
     $t11audit = if (Test-Path $a11) { Get-Content $a11 -Raw } else { "" }
+    # 把审计内容落进日志:路径断言失败时能直接看到实际采到的路径形态
+    Write-Host "----- T11 审计 -----"
+    Write-Host $t11audit
     Assert "T11a stderr 自报路径被采集" ($t11audit -match '"source":"stderr-selfreport"')
     Assert "T11b 路径精度标注为 reported" ($t11audit -match '"precision":"reported"')
     Assert "T11c 归属确定(attributed=true)" ($t11audit -match '"attributed":true')

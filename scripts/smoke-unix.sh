@@ -342,7 +342,10 @@ for ln in open(sys.argv[1]):
   wait "$T7H_PID"
   cat "$ROOT/t7h.out" >> "$LOG"
 else
-  assert "T7a 能力报告如实标注自动采集不可用" test "$AUTO_CAP" = "unavailable"
+  # ⚠️ 这里要断言的是**内核日志通道(L2)**不可用,不是「自动采集」不可用:
+  # 只有 L1(stderr 自报)的平台上,auto_violation_capture 同样是 full/partial
+  # (L1 确实在工作),拿它当判据会误判。
+  assert "T7a 无内核通道时能力报告如实标注该通道不可用" test -z "$L2_PROBE"
   warn "T7b 内核违规日志自动采集:该平台不可用,不计失败(见 docs/06)"
 fi
 
@@ -672,8 +675,10 @@ if [[ -n "$PROBE" ]]; then
 else
   assert "T15a 无内核通道时只采到自称路径" \
     bash -c "grep 'claimed\.txt' '$A15' | grep -q '\"event\":\"violation\"'"
+  # ⚠️ 只排除**内核通道**采到的条目:审计里出现 actual.txt 本身不算失败——
+  # 策略感知(source=explicit)也会记下这个路径,那是正常行为。
   assert "T15b 无内核通道时采不到从未被拒的真实路径" \
-    bash -c "! grep -q 'actual\.txt' '$A15'"
+    bash -c "! grep 'actual\.txt' '$A15' | grep -q '\"source\":\"sandbox-log\"'"
 fi
 # 只授权【自称】路径 → 重跑 → 真实路径仍必须写不动
 "$BIN" authorize -p "$P15" --path "$CLAIMED" --access write >>"$LOG" 2>&1
