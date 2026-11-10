@@ -24,6 +24,9 @@ use crate::common::quote_arg;
 pub struct Child {
     pub process: HANDLE,
     pub thread: HANDLE,
+    /// 原生 PROCESS_INFORMATION。保留以便上层按需查句柄/进程 id,
+    /// 当前 Windows 后端只用到其中一部分,故显式豁免 dead_code。
+    #[allow(dead_code)]
     pub pi: PROCESS_INFORMATION,
 }
 

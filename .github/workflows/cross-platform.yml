@@ -88,7 +88,6 @@ jobs:
             cat smoke.log fmt.log clippy.log test.log 2>/dev/null | tail -n 500 || true
             echo '```'
           } > "$out"
-          cp "$out" ci/last-run.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ci
@@ -102,26 +101,33 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TITLE: smoke failure ${{ github.run_id }} ${{ matrix.os }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           { test -f smoke.log || echo "no smoke.log"; } > all.log
           for f in fmt.log clippy.log test.log; do
             { echo "===== $f ====="; cat "$f" 2>/dev/null; } >> all.log
           done
+          # 用 curl 而不是 python urllib:CI 上 python 的 SSL 上下文常缺中间证书,
+          # urllib 会抛 CERTIFICATE_VERIFY_FAILED,导致这个步骤本身失败、
+          # 把真正的失败日志一起丢掉。
+          title="smoke failure ${{ github.run_id }} ${{ matrix.os }}"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           python3 - <<'PY'
-          import json, os, urllib.request
+          import json, os
           raw = open("all.log", errors="replace").read()[-60000:]
-          title = "smoke failure %s %s" % (os.environ["GITHUB_RUN_ID"], os.environ["RUNNER_OS"])
-          run = "%s/%s/actions/runs/%s" % (
-              os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"])
+          run = os.environ["RUN_URL"]
           body = "run: " + run + "\n\n```text\n" + raw + "\n```\n"
-          req = urllib.request.Request(
-              os.environ["GITHUB_API_URL"] + "/repos/" + os.environ["GITHUB_REPOSITORY"] + "/issues",
-              data=json.dumps({"title": title, "body": body}).encode(),
-              headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
-                       "Accept": "application/vnd.github+json",
-                       "Content-Type": "application/json"})
-          print("issue status", urllib.request.urlopen(req).status)
+          open("issue.json", "w").write(json.dumps(
+              {"title": os.environ["TITLE"], "body": body}, ensure_ascii=False))
           PY
+          curl -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/issues" \
+            --data @issue.json -o issue.out -w "issue status %{http_code}\n" || true
+          cat issue.out 2>/dev/null | head -c 300 || true
 
   windows-check:
     runs-on: windows-latest
@@ -169,7 +175,6 @@ jobs:
             cat fmt.log clippy.log test.log 2>/dev/null | tail -n 300 || true
             echo '```'
           } > "$out"
-          cp "$out" ci/last-run.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ci

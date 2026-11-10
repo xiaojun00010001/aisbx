@@ -32,7 +32,7 @@ use super::audit::Audit;
 use super::netproxy::NetState;
 use crate::common::expand_path;
 
-/// ── 服务端 ────────────────────────────────────────────────────────────
+// ── 服务端 ────────────────────────────────────────────────────────────
 
 /// 已签发未消费的授权 token:token -> (路径, 访问级别, 过期时刻)。
 pub type TokenStore = Arc<Mutex<HashMap<String, IssuedToken>>>;
@@ -60,7 +60,12 @@ pub struct BrokerHandle {
     /// 待用户授权的越界列表(供 `aisbx status` 查询;agent 据此问用户)。
     pub pending: Arc<Mutex<Vec<PendingViolation>>>,
     /// 当前执行轮次 / 重试次数(供 status 查询)。
+    /// 当前执行轮次(供 status 查询)。Windows 侧暂未接入 launcher 的等待逻辑,
+    /// 字段先留着与 Unix 侧对齐——故显式豁免 dead_code。
+    #[allow(dead_code)]
     pub attempt: Arc<AtomicU32>,
+    /// 重试次数(供 status 查询)。同上:与 Unix 侧对齐,暂未使用。
+    #[allow(dead_code)]
     pub retries: Arc<AtomicU32>,
 }
 
@@ -424,7 +429,7 @@ unsafe fn write_all(h: HANDLE, data: &[u8]) {
     );
 }
 
-/// ── 裁决 ──────────────────────────────────────────────────────────────
+// ── 裁决 ──────────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
 struct EscRequest {
@@ -573,7 +578,7 @@ fn decide_net(policy: &Policy, req: &EscRequest, audit: &Audit) -> String {
     )
 }
 
-/// ── 宿主控制通道:token 签发 ──────────────────────────────────────────
+// ── 宿主控制通道:token 签发 ──────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
 struct IssueRequest {
@@ -749,12 +754,7 @@ fn redeem_token(
 /// 登记运行中提权落下的 ACL 目标,供任务结束统一撤销(C20)。
 fn record_acl(list: &Arc<Mutex<Vec<String>>>, target: &str, is_placeholder: bool) {
     let mut g = list.lock().unwrap_or_else(|p| p.into_inner());
-    // 占位文件加前缀标记:任务结束撤销 ACL 时据此把空占位文件一并回收。
-    let entry = if is_placeholder {
-        format!("{}{}", acl::PLACEHOLDER_MARK, target)
-    } else {
-        target.to_string()
-    };
+    let entry = acl::acl_entry(target, is_placeholder);
     if !g.iter().any(|p| p.eq_ignore_ascii_case(&entry)) {
         g.push(entry);
     }
@@ -825,7 +825,7 @@ fn json_reply(granted: bool, reason: &str) -> String {
     serde_json::json!({ "granted": granted, "reason": reason }).to_string()
 }
 
-/// ── 客户端(沙箱内执行 `aisbx escalate`) ─────────────────────────────
+// ── 客户端(沙箱内执行 `aisbx escalate`) ─────────────────────────────
 
 pub fn escalate_client(
     policy: &Policy,

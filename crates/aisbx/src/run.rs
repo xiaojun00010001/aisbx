@@ -124,14 +124,15 @@ pub fn run_windows(
                 if granted_paths.iter().any(|x| x.eq_ignore_ascii_case(g)) {
                     continue;
                 }
-                // 授权路径可能尚不存在(被拒的正是「要创建的文件」),
-                // 故用 grant_path:它会改为对父目录授可继承 ACE。
+                // 授权路径可能尚不存在(被拒的正是「要创建的文件」):
+                // grant_path_precise 会由宿主预创建空占位文件,再对该文件授 Modify。
                 match acl::grant_path_precise(&package_sid, g, true) {
-                    Ok(target) => {
+                    Ok((target, is_placeholder)) => {
                         granted_paths.push(g.clone());
-                        // 任务结束统一撤销(C20:不留持久 ACL 残余)
+                        // 任务结束统一撤销(C20:不留持久 ACL 残余);
+                        // 占位文件带标记,结束时连同空文件一起回收。
                         if let Ok(mut list) = broker.granted_acl.lock() {
-                            list.push(target);
+                            list.push(acl::acl_entry(&target, is_placeholder));
                         }
                     }
                     Err(e) => eprintln!("aisbx: 警告: 授权路径落 ACL 失败 {g}: {e}"),

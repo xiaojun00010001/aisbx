@@ -59,7 +59,6 @@ jobs:
           $md = "# CI run $env:GITHUB_RUN_ID (windows)`n`n- commit: $env:GITHUB_SHA`n- job status: $env:JOB_STATUS`n`n" +
                 "```text`n" + $raw + "`n```"
           Set-Content "ci/runs/$env:GITHUB_RUN_ID-windows.md" -Value $md -Encoding utf8
-          Copy-Item "ci/runs/$env:GITHUB_RUN_ID-windows.md" "ci/last-run.md" -Force
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ci

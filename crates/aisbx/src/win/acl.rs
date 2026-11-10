@@ -26,6 +26,18 @@ pub fn grant_file(sid: &str, path: &str, write: bool) -> Result<(), String> {
 /// 以控制字符开头,不会与真实路径冲突。
 pub const PLACEHOLDER_MARK: &str = "\u{1}ph:";
 
+/// 授权目标记入 `granted_acl` 时的条目形式。
+///
+/// 占位文件要加前缀标记:任务结束撤销 ACL 时据此回收**仍是空文件**的占位文件
+/// (沙箱已写入内容的,那是用户要的结果,必须留下)。
+pub fn acl_entry(target: &str, is_placeholder: bool) -> String {
+    if is_placeholder {
+        format!("{}{}", PLACEHOLDER_MARK, target)
+    } else {
+        target.to_string()
+    }
+}
+
 /// 对任意路径落 ACL,返回 (实际被授权的路径, 该路径是否为宿主预创建的占位文件)。
 ///
 /// 提权常发生在「文件尚不存在、沙箱随后要创建」的场景,而 icacls 对不存在的
