@@ -70,12 +70,19 @@ jobs:
             echo "- job status: ${JOB_STATUS}"
             echo
             echo '```text'
+            # **完整**日志,不截断 —— 要的是「所有日志输出」,便于逐项核对。
             for f in smoke.log test.log; do
               echo "===== $f ====="
-              tail -n 120 "$f" 2>/dev/null || true
+              if [ -f "$f" ]; then cat "$f"; fi
             done
             echo '```'
           } > "$out"
+          # 防呆:日志异常大时不至于让 push 失败 → 保留头尾,截掉中段
+          if [ "$(wc -c < "$out")" -gt 4000000 ]; then
+            head -c 2500000 "$out" > "$out.trim"
+            tail -c 1000000 "$out" >> "$out.trim"
+            mv "$out.trim" "$out"
+          fi
           export GIT_EDITOR=true
           export GIT_TERMINAL_PROMPT=0
           git config --global core.editor true || true
