@@ -53,7 +53,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path ci/runs | Out-Null
           $raw = ""
           foreach ($f in @("smoke.log", "test.log")) {
-            if (Test-Path $f) { $raw += "===== $f =====`n" + (Get-Content $f -Raw) + "`n" }
+            if (Test-Path $f) {
+              $raw += "===== $f =====`n"
+              # 各文件单独截断:合并截断会把前面的内容挤掉
+              $raw += ((Get-Content $f -Tail 120) -join "`n") + "`n"
+            }
           }
           if ($raw.Length -gt 60000) { $raw = $raw.Substring($raw.Length - 60000) }
           $md = "# CI run $env:GITHUB_RUN_ID (windows)`n`n- commit: $env:GITHUB_SHA`n- job status: $env:JOB_STATUS`n`n" +

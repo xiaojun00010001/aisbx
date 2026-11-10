@@ -123,6 +123,9 @@ pub fn pgid_table() -> std::collections::HashMap<u32, u32> {
 }
 
 #[cfg(not(target_os = "macos"))]
+/// 非 macOS 平台的桩实现:pid→pgid 反查是 **macOS 内核通道(L2)** 的兜底
+/// 归属判据,只有 L1 的平台上没有调用者 → 显式豁免 dead_code。
+#[allow(dead_code)]
 pub fn pgid_table() -> std::collections::HashMap<u32, u32> {
     std::collections::HashMap::new()
 }

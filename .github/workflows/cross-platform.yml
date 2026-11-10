@@ -85,7 +85,11 @@ jobs:
             echo "- job status: ${{ job.status }}"
             echo
             echo '```text'
-            cat smoke.log fmt.log clippy.log test.log 2>/dev/null | tail -n 500 || true
+            # 各文件分别截断:合并 tail 会让前面的门禁日志被长冒烟日志挤掉
+            for f in smoke.log fmt.log clippy.log test.log; do
+              echo "===== $f ====="
+              tail -n 120 "$f" 2>/dev/null || true
+            done
             echo '```'
           } > "$out"
           git config user.name "github-actions[bot]"
