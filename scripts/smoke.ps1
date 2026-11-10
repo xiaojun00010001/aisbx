@@ -43,14 +43,18 @@ function Push-Progress($stage) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $f = Join-Path $dir "windows-progress.md"
     Add-Content -Path $f -Value ("- {0} @ {1}" -f $stage, (Get-Date -Format HH:mm:ss)) -Encoding UTF8
+    $env:GIT_EDITOR = "true"
+    $env:GIT_TERMINAL_PROMPT = "0"
+    git config --global core.editor true 2>&1 | Out-Null
     git config user.name "github-actions[bot]"
     git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
     git add ci/runs/windows-progress.md
     git commit -q -m "ci: windows smoke progress $stage [skip ci]"
     if ($LASTEXITCODE -ne 0) { return }
-    git checkout main 2>&1 | Out-Null
-    git pull --rebase origin main 2>&1 | Out-Null
-    git push origin HEAD:main 2>&1 | Out-Null
+    git checkout -B ci-results 2>&1 | Out-Null
+    git pull --rebase origin ci-results 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { git rebase --abort 2>&1 | Out-Null }
+    git push origin HEAD:ci-results 2>&1 | Out-Null
   } catch {
     # 进度回写是尽力而为,失败不能影响冒烟本身
   }
@@ -630,6 +634,7 @@ try {
     # ── 跨平台契约检查(与 Unix **共用同一份** contract_check.py 与基线)──
     # 目的是保证「三个环境的表现形式与交互一样」:能力报告的键集合、
     # --json 事件流的事件名、审计事件类型、退出码语义,三平台必须一致。
+    Push-Progress "contract"
     Write-Host "[$(Get-Date -Format HH:mm:ss)] == 跨平台契约检查 =="
     $cp = Join-Path $root "contract"
     New-Item -ItemType Directory -Force -Path $cp | Out-Null
