@@ -53,9 +53,6 @@ function Push-Progress($stage) {
     if ($LASTEXITCODE -ne 0) { return }
     # 进度走独立分支:15 次 push 不与任何结果回写抢同一分支
     $br = "ci-results/progress"
-    git checkout -B $br 2>&1 | Out-Null
-    git pull --rebase origin $br 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) { git rebase --abort 2>&1 | Out-Null }
     git push origin "HEAD:$br" 2>&1 | Out-Null
   } catch {
     # 进度回写是尽力而为,失败不能影响冒烟本身
