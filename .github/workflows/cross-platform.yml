@@ -97,8 +97,6 @@ jobs:
           git config --global core.editor true || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ci
-          git commit -q -m "ci: record run ${{ github.run_id }} ${{ matrix.os }} [skip ci]" || exit 0
           # 三个 job 并发回写会互相冲突 → 先 rebase 再推
           # actions/checkout 可能是 detached HEAD → 先确保在 main 分支上,
           # 否则 push 推不动(实测后完成的 job 回写全部丢失)。
@@ -197,8 +195,6 @@ jobs:
           git config --global core.editor true || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ci
-          git commit -q -m "ci: record run ${{ github.run_id }} windows-check [skip ci]" || exit 0
           # 独立分支:各 job 各写各的 → 零并发竞争
           # (挤在同一分支上会互相 rebase 冲突 → abort → 结果被挤掉,
           #  实测 Windows 那轮的结果就因此丢了)
