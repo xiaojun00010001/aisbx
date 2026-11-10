@@ -93,8 +93,12 @@ jobs:
           git add ci
           git commit -q -m "ci: record run ${{ github.run_id }} ${{ matrix.os }} [skip ci]" || exit 0
           # 三个 job 并发回写会互相冲突 → 先 rebase 再推
+          # actions/checkout 可能是 detached HEAD → 先确保在 main 分支上,
+          # 否则 push 推不动(实测后完成的 job 回写全部丢失)。
+          git checkout main || git switch main || true
+          # 三个 job 并发回写会互相冲突 → 先 rebase 再推
           git pull --rebase origin main || true
-          git push || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志与 Issue"
+          git push origin HEAD:main || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志与 Issue"
 
       - name: Publish failure log
         if: failure()

@@ -411,12 +411,15 @@ try {
     # JSON 里反斜杠被转义成双反斜杠,匹配前先做同样的转义
     # 采集到的路径可能是「程序自报的原样路径」,也可能是「规范化后的长路径」
     # (Windows 的 canonicalize 会补长路径)——两种形态都算对。
+    # 只匹配**路径尾部**(目录名 + 文件名),不比整条路径:
+    #   - 程序自报的是原样路径(CI 上是 8.3 短路径 RUNNER~1);
+    #   - 规范化后的是长路径(C:\Users\runneradmin\...);
+    #   - JSON 里反斜杠还要再转义一层。
+    # 三种形态同时存在,只有尾部是稳定判据。
+    $t11dir  = (Split-Path $t11target -Parent | Split-Path -Leaf)
     $t11leaf = Split-Path $t11target -Leaf
-    $t11long = "$((Get-Item (Split-Path $t11target -Parent)).FullName)\$t11leaf"
-    $t11esc  = ($t11target -replace '\\', '\\\\')
-    $t11escL = ($t11long  -replace '\\', '\\\\')
-    Assert "T11d 采集到的路径正确" `
-      (($t11audit -match [regex]::Escape($t11esc)) -or ($t11audit -match [regex]::Escape($t11escL)))
+    $t11tail = [regex]::Escape($t11dir) + "\\+" + [regex]::Escape($t11leaf)
+    Assert "T11d 采集到的路径正确" ($t11audit -match $t11tail)
     } catch {
       Warn "T11 段异常: $_"
       $script:rows += "| T11 段异常(未跑完) | **FAIL** |"
