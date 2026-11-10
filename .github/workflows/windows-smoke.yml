@@ -17,10 +17,11 @@ permissions:
 jobs:
   smoke:
     runs-on: windows-latest
-    # ⚠️ 12 分钟不够:Windows 的 46 项断言里有多处等待(T2 token 授权 90 秒、
-    # T12/T13 各 60 秒),加上 AppContainer/icacls 的开销,总时长会超过 12 分钟
-    # → job 被 cancel,连回写都来不及(实测 Windows 冒烟整轮跑不完)。
-    timeout-minutes: 30
+    # ⚠️ 12/30 分钟都不够:Windows 的 46 项断言里有多处等待(T2 token 授权 90 秒、
+    # T12/T13 各 60 秒),加上 AppContainer/icacls 开销与 release 编译,整轮会
+    # 超过 30 分钟 → job 被 cancel,连 always 的回写与 Issue 都来不及
+    # (实测:超时的轮次既无 ci/runs 回写、也无 Issue,因为根本没跑到那一步)。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
