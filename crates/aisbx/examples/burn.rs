@@ -513,7 +513,14 @@ fn spoof(claimed: &str, actual: &str) -> i32 {
         println!("ACTUAL_WRITABLE {actual}");
     }
     // 再自称一个「被拒」的路径(内核从未拒绝过它 → 只有 stderr 里有)
+    // ⚠️ 两种形态都自称:Unix 形态与 Windows(.NET)形态 ——
+    // L1 采集是**按 stderr 文本解析**的,各平台的解析规则认的形态不同
+    // (Windows 只认 .NET 形态)。只自称一种形态 → 另一个平台采不到 →
+    // 对抗用例在那个平台上退化成「什么都没采到」(实测 Windows 上正是如此:
+    // 自称路径根本没进审计,T15a 假失败)。
+    // 两条说的是同一个路径 → 采到几条都无妨。
     eprintln!("sh: {claimed}: Operation not permitted");
+    eprintln!("Write-Error: Access to the path '{claimed}' is denied.");
     println!("CLAIMED_REPORTED {claimed}");
     if denied {
         1

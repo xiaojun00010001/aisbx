@@ -683,8 +683,13 @@ try {
     # 输出继承控制台(不重定向)→ 避开上面那条路径坑;只看退出码
     # 报告落进回写目录:契约检查的输出继承控制台,而 Issue 只带 smoke.log →
     # 失败详情会丢;落盘才能随结果一起被读到。
-    New-Item -ItemType Directory -Force -Path "ci/runs" | Out-Null
-    $env:CONTRACT_REPORT_OUT = "ci/runs/contract-$cpPlatform.md"
+    # 报告落进回写目录:契约检查的输出继承控制台,而 Issue 只带 smoke.log →
+    # 失败详情会丢;落盘才能随结果一起被读到。
+    # ⚠️ 用**绝对路径** + --out(--out 之前是**死参数**:声明了却从不生效 →
+    # Windows 侧契约报告一直没生成,失败详情只能靠猜)。
+    $cpReport = Join-Path $repo "ci/runs/contract-$cpPlatform.md"
+    New-Item -ItemType Directory -Force -Path (Join-Path $repo "ci/runs") | Out-Null
+    $cArgs += @('--out', $cpReport)
     $pChk = Start-Process -FilePath "python" -NoNewWindow -PassThru -ArgumentList $cArgs
     if (-not $pChk.WaitForExit(30000)) {
       $pChk.Kill()

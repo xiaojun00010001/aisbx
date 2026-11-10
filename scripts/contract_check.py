@@ -23,6 +23,7 @@ import sys
 
 FAILURES = []
 CHECKS = 0
+REPORT_OUT = ""
 
 
 REPORT = []
@@ -83,6 +84,8 @@ def main():
     ap.add_argument("--exit-code", type=int, default=None, help="被测命令的退出码")
     ap.add_argument("--out", default="", help="把报告另存到该文件(便于随 CI 结果回写)")
     args = ap.parse_args()
+    global REPORT_OUT
+    REPORT_OUT = (args.out or "").strip()
 
     base = load_json(args.baseline)
     caps_doc = load_json(args.caps)
@@ -215,7 +218,10 @@ def finish():
     for t in tail:
         print(t)
         REPORT.append(t)
-    out = os.environ.get("CONTRACT_REPORT_OUT", "").strip()
+    # 报告落盘路径:环境变量优先(Unix 侧用),其次 --out(Windows 侧用)。
+    # ⚠️ --out 之前是个**死参数**:声明了却从不生效 → Windows 侧契约报告
+    # 一直没生成,失败详情只能靠猜。
+    out = os.environ.get("CONTRACT_REPORT_OUT", "").strip() or REPORT_OUT
     if out:
         # 报告落文件:Windows 上契约检查的输出继承控制台,Issue 只带 smoke.log →
         # 失败详情会丢。落进回写目录就能随结果一起被读到。
