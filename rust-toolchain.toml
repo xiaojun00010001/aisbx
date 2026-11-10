@@ -1,2 +1,6 @@
 [toolchain]
 channel = "1.99.1"
+# ⚠️ 必须显式声明组件:rustup 按 minimal profile 装 toolchain 时**不含**
+# rustfmt / clippy → CI 上 `cargo fmt` 会直接报「cargo-fmt 未安装」,
+# 表现为 Format check 步骤在所有平台齐刷刷失败(与格式本身无关)。
+components = ["rustfmt", "clippy"]
