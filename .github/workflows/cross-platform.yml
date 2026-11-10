@@ -102,10 +102,13 @@ jobs:
           # 三个 job 并发回写会互相冲突 → 先 rebase 再推
           # actions/checkout 可能是 detached HEAD → 先确保在 main 分支上,
           # 否则 push 推不动(实测后完成的 job 回写全部丢失)。
-          git checkout -B ci-results || git switch ci-results || git checkout main || true
-          # 三个 job 并发回写会互相冲突 → 先 rebase 再推
-          git pull --rebase origin ci-results || { git rebase --abort || true; }
-          git push origin HEAD:ci-results || echo "::notice::结果回写失败(分支可能受保护),请看 run 日志与 Issue"
+          # 独立分支:各 job 各写各的 → 零并发竞争
+          # (挤在同一分支上会互相 rebase 冲突 → abort → 结果被挤掉,
+          #  实测 Windows 那轮的结果就因此丢了)
+          BR="ci-results/unix-${{ matrix.os }}"
+          git checkout -B "$BR" || git switch "$BR" || git checkout main || true
+          git pull --rebase origin "$BR" || { git rebase --abort || true; }
+          git push origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
 
       - name: Publish failure log
         if: failure()
@@ -193,6 +196,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ci
           git commit -q -m "ci: record run ${{ github.run_id }} windows-check [skip ci]" || exit 0
-          git checkout -B ci-results || git switch ci-results || git checkout main || true
-          git pull --rebase origin ci-results || { git rebase --abort || true; }
-          git push origin HEAD:ci-results || echo "::notice::结果回写失败,请看 run 日志与 Issue"
+          # 独立分支:各 job 各写各的 → 零并发竞争
+          # (挤在同一分支上会互相 rebase 冲突 → abort → 结果被挤掉,
+          #  实测 Windows 那轮的结果就因此丢了)
+          BR="ci-results/windows-check"
+          git checkout -B "$BR" || git switch "$BR" || git checkout main || true
+          git pull --rebase origin "$BR" || { git rebase --abort || true; }
+          git push origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
