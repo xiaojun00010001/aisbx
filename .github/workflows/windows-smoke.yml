@@ -81,7 +81,7 @@ jobs:
           # actions/checkout 可能是 detached HEAD → 先确保在 main 分支上
           # 独立分支:与其它 job 的回写零竞争
           $br = "ci-run/windows-smoke"
-          git push origin "HEAD:$br"
+          git push --force origin "HEAD:$br"
           if ($LASTEXITCODE -ne 0) { Write-Host "::notice::结果回写失败(分支可能受保护),请看 run 日志与 Issue" }
           # 回写是「尽力而为」,失败也不应把这一步判为失败
           exit 0

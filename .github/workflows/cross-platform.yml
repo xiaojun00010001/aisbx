@@ -109,7 +109,7 @@ jobs:
           BR="ci-run/unix-${{ matrix.os }}"
           git add -A ci || true
           git commit -q -m "ci: record run ${{ github.run_id }} ${{ matrix.os }} [skip ci]" || true
-          git push origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
+          git push --force origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
 
       - name: Publish failure log
         if: failure()
@@ -201,4 +201,4 @@ jobs:
           BR="ci-run/windows-check"
           git add -A ci || true
           git commit -q -m "ci: record run ${{ github.run_id }} windows-check [skip ci]" || true
-          git push origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
+          git push --force origin "HEAD:$BR" || echo "::notice::结果回写失败,请看 run 日志与 Issue"
