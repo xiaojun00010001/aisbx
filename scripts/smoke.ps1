@@ -711,7 +711,9 @@ try {
     # 用 PS 原生调用 + @cArgs 展开 → 输出同时进 console 与 check.out
     # (失败详情不会再整个丢)。
     $cpChkOut = Join-Path $cp "check.out"
-    & python scripts/contract_check.py @cArgs 2>&1 | Tee-Object -FilePath $cpChkOut
+    # ⚠️ $cArgs 里**已经**含脚本路径,这里不能再写一遍
+    # (写重了 → python 收到两份 → argparse 报 "unrecognized arguments",exit=2)
+    & python @cArgs 2>&1 | Tee-Object -FilePath $cpChkOut
     $cpChkRc = $LASTEXITCODE
     Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" ($cpChkRc -eq 0)
   }
