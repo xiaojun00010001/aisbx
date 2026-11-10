@@ -781,9 +781,29 @@ PY
 # 一次最小越界 run:收集 --json 事件流、审计与退出码
 # ⚠️ 必须有界:契约检查是纯文件处理(秒级),卡住就是出了问题 ——
 # 不能让它把整轮冒烟拖死(Windows 侧就踩过这个坑)。
-timeout 60 "$BIN" run -p "$CP/policy.json" --json -- /bin/sh -c "echo hi > $OUT/contract.txt" \
-  > "$CP/events.jsonl" 2>"$CP/run.err"
-CP_RC=$?
+# ⚠️ 这里**不能**用 `timeout` 命令:macOS 自带 BSD coreutils,**没有 timeout**
+# (只有装了 coreutils 才有 gtimeout)→ 命令直接 127 → 事件流空、审计空、
+# 退出码 127 → 契约检查凭空判 2 项 FAIL(实测 macOS 就是这么红的,并非契约不一致)。
+# 改用 python3 做超时(脚本本身就依赖 python3,三平台都有)——
+# 语义与 Windows 侧的 Start-Process + WaitForExit 一致。
+CP_RC=$(python3 - "$BIN" "$CP/policy.json" "$CP/events.jsonl" "$CP/run.err" "$OUT/contract.txt" <<'PY'
+import subprocess, sys
+
+bin_, policy, events, err, target = sys.argv[1:]
+cmd = [bin_, "run", "-p", policy, "--json", "--",
+       "/bin/sh", "-c", "echo hi > %s" % target]
+rc = 124  # 超时兜底:124 不在约定退出码集合内 → 会如实判 FAIL
+try:
+    with open(events, "wb") as fo, open(err, "wb") as fe:
+        rc = subprocess.run(cmd, stdout=fo, stderr=fe, timeout=60).returncode
+except subprocess.TimeoutExpired:
+    rc = 124
+except Exception as e:
+    sys.stderr.write("契约采集失败: %s\n" % e)
+    rc = 125
+sys.exit(rc)
+PY
+)
 # ⚠️ 平台名必须取自能力报告的 backend:同一个 Unix 脚本在 macOS 与 Linux
 # 两个 runner 上跑,写死 linux 会让 macOS 拿 Linux 的期望去比 → 假失败。
 CP_PLATFORM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['backend'])" "$CP/caps.json")
