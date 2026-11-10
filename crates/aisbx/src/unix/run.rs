@@ -208,9 +208,13 @@ where
             let mut s = broker.state.lock().unwrap_or_else(|p| p.into_inner());
             s.retries = attempt;
         }
+        // ⚠️ 带上本次重跑实际使用的授权路径与占位文件:Linux 上「授权后
+        // 重跑仍写不进」时,只看重跑事件看不出白名单到底有没有变 ——
+        // 需要知道 granted 列表与占位文件是否就位(诊断用,字段不参与契约)。
         emit(json!({
             "event": "retry", "from": attempt, "to": attempt + 1,
-            "reason": "user-approved", "command_id": command_id
+            "reason": "user-approved", "command_id": command_id,
+            "granted": snap.granted, "placeholders": snap.placeholders
         }));
         attempt += 1;
     }
