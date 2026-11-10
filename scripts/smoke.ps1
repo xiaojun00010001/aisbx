@@ -697,20 +697,25 @@ try {
     # 平台名取自能力报告的 backend(不写死):契约基线按平台给期望值,
     # 写死会在平台间张冠李戴(实测 macOS 被 Linux 的期望判失败)。
     $cpPlatform = (Get-Content "$cp\caps.json" -Raw | ConvertFrom-Json).backend
-    # ⚠️ 契约检查的输出**继承控制台**时不进 smoke.log → 失败详情整个丢
-    # (实测:报告没生成 + 输出也不可见 → 只能靠猜)。
-    # 现在两样都落盘:报告(--out)+ 控制台输出(check.out)→ 下轮直接可读。
-    # ⚠️ 用 cmd 重定向(不用 Start-Process -Redirect*:CI 短路径下会报错,实测踩过)。
-    # cmd /c 会把子进程退出码作为自己的退出码 → $pChk.ExitCode 仍是检查结果 ✓
-    $cpReport = Join-Path $repo "ci/runs/contract-$cpPlatform.md"
-    $cpChkOut = Join-Path $cp "check.out"
-    New-Item -ItemType Directory -Force -Path (Join-Path $repo "ci/runs") | Out-Null
-    $cpChkCmd = 'python scripts/contract_check.py --caps {0} --baseline scripts/contract-baseline.json --platform {1} --events {2} --audit {3} --exit-code {4} --out {5} > {6} 2>&1' -f `
-      "$cp\caps.json", $cpPlatform, $cpe, $cpa, $cpRc, $cpReport, $cpChkOut
-    $pChk = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru -ArgumentList @('/c', $cpChkCmd)
-    if (Test-Path $cpChkOut) { Write-Host ((Get-Content $cpChkOut -Raw)) }
-    if (-not $pChk.WaitForExit(30000)) {
-      $pChk.Kill()
+    # 报告落进回写目录:契约检查的输出继承控制台 → 不进 smoke.log →
+        # 失败详情会丢;落盘才能随结果一起被读到。
+        # ⚠️ --out 之前是**死参数**(声明了却从不生效)→ 已接上。
+        $cpReport = Join-Path $repo "ci/runs/contract-$cpPlatform.md"
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "ci/runs") | Out-Null
+        $cArgs = @('scripts/contract_check.py',
+          '--caps', "$cp\caps.json",
+          '--baseline', 'scripts/contract-baseline.json',
+          '--platform', $cpPlatform,
+          '--events', $cpe,
+          '--audit', $cpa,
+          '--exit-code', "$cpRc",
+          '--out', $cpReport)
+        # ⚠️ 直接跑 python,**不经 cmd /c**:cmd 的参数传递与重定向在 CI 里不可靠
+        # (实测:输出文件根本没生成 → 失败详情全丢,只能靠猜)。
+        # 报告由 python 自己写(--out)→ 不依赖任何 shell 重定向。
+        $pChk = Start-Process -FilePath "python" -NoNewWindow -PassThru -ArgumentList $cArgs
+        if (-not $pChk.WaitForExit(30000)) {
+          $pChk.Kill()
       Write-Host "::notice::契约检查超时,已终止"
       Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" $false
     } else {
