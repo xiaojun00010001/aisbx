@@ -44,12 +44,17 @@ macOS 使用系统 `/usr/bin/sandbox-exec`。
 # Linux / macOS:B 契约冒烟(策略/拒绝感知/授权重执行/token 一次性/网络/审计/能力报告)
 bash scripts/smoke-unix.sh
 
-# Windows:46 项断言(管理员 PowerShell;GitHub Actions runner 天然满足)
+# Windows:52 项断言(管理员 PowerShell;GitHub Actions runner 天然满足)
 .\scripts\smoke.ps1
 ```
 
-CI：`.github/workflows/windows-smoke.yml`（Windows 18 项）与
-`.github/workflows/cross-platform.yml`（ubuntu/macos B 契约冒烟 + Windows 编译检查）。
+CI：`.github/workflows/windows-smoke.yml`（Windows 真机冒烟）与
+`.github/workflows/cross-platform.yml`（ubuntu/macos 真机冒烟 + Windows 编译检查）。
+**三平台真机行为只由 workflow 验证**，本地只做 fmt/clippy/单测 + Windows 交叉编译。
+结果回写到仓库 `ci-results/*` 分支（`git fetch origin 'refs/heads/ci-results/*'`），
+不依赖 GitHub API 配额；另有**三平台共用同一份**跨平台契约检查
+（`scripts/contract_check.py` + `scripts/contract-baseline.json`），
+保证能力报告键集合 / 事件名 / 审计事件类型 / 退出码语义在三平台同形。
 失败时工作流会把完整日志自动发布为 Issue，便于无鉴权诊断。
 
 ## 文档
@@ -94,8 +99,10 @@ v0.5：三平台后端与 B 契约闭环已落地，主线统一为「**感知 �
 两条感知通道都遵守「**未能归属 ≠ 是本次越界**」：未归属条目只进审计、不驱动授权，
 也不能被用来申请授权。
 
-本机 macOS 冒烟 **58 PASS / 0 FAIL / 4 WARN**（T0–T15；4 WARN 为平台不具备/不适用的能力）。
-Windows 的 T11–T13 由 GitHub Actions windows-smoke 验证（本机无 Windows 内核，
+三平台真机冒烟与跨平台契约检查均由 GitHub Actions 验证（macos-latest /
+ubuntu-latest / windows-latest）；场景矩阵与断言规模见
+[docs/07 测试覆盖矩阵](docs/07-测试覆盖矩阵.md)（含结果读取方式）。
+Windows 的 T11–T15 由 GitHub Actions windows-smoke 验证（本机无 Windows 内核，
 **只做了交叉编译、未本地真机执行**）。已知边界（按域运行时放行、macOS 资源硬限制、
 Linux 内核侧精确路径、Windows 精确路径采集需 minifilter）均如实登记在能力报告中，
 未静默降级。
