@@ -779,13 +779,15 @@ json.dump({
 }, open(policy, "w"), indent=2)
 PY
 # 一次最小越界 run:收集 --json 事件流、审计与退出码
-"$BIN" run -p "$CP/policy.json" --json -- /bin/sh -c "echo hi > $OUT/contract.txt" \
+# ⚠️ 必须有界:契约检查是纯文件处理(秒级),卡住就是出了问题 ——
+# 不能让它把整轮冒烟拖死(Windows 侧就踩过这个坑)。
+timeout 60 "$BIN" run -p "$CP/policy.json" --json -- /bin/sh -c "echo hi > $OUT/contract.txt" \
   > "$CP/events.jsonl" 2>"$CP/run.err"
 CP_RC=$?
 # ⚠️ 平台名必须取自能力报告的 backend:同一个 Unix 脚本在 macOS 与 Linux
 # 两个 runner 上跑,写死 linux 会让 macOS 拿 Linux 的期望去比 → 假失败。
 CP_PLATFORM=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['backend'])" "$CP/caps.json")
-if python3 scripts/contract_check.py \
+if timeout 60 python3 scripts/contract_check.py \
      --caps "$CP/caps.json" \
      --baseline scripts/contract-baseline.json \
      --platform "$CP_PLATFORM" \

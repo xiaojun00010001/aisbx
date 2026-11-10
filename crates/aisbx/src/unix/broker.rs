@@ -74,6 +74,7 @@ impl Broker {
         let s = self.state.lock().unwrap_or_else(|p| p.into_inner());
         RunSnapshot {
             granted: s.granted.clone(),
+            placeholders: s.placeholders.clone(),
             violations: s.violations.len(),
             token: s.last_token.clone(),
             command_id: s.command_id.clone(),
@@ -91,6 +92,8 @@ impl Broker {
 #[derive(Clone, Default)]
 pub struct RunSnapshot {
     pub granted: Vec<String>,
+    /// 宿主预创建的占位文件(授权「尚不存在的文件」时才有),任务结束时回收。
+    pub placeholders: Vec<String>,
     pub violations: usize,
     pub token: String,
     pub command_id: String,
@@ -208,6 +211,8 @@ fn decide_file(s: &mut State, req: &EscRequest) -> String {
         {
             Ok(t) => {
                 s.widen(&t.path);
+                // 授权的文件可能尚不存在 → 预创建占位文件,否则 bwrap 绑不上
+                s.ensure_placeholder(&t.path);
                 s.audit.log(&json!({
                     "event": "token.redeemed", "path": path, "access": req.access,
                     "command_id": s.command_id
@@ -230,6 +235,9 @@ fn decide_file(s: &mut State, req: &EscRequest) -> String {
 
     if auto_ok || prompt_ok {
         s.widen(&path);
+        // 授权的目标文件可能尚不存在 → 预创建空占位文件,
+        // 否则 bwrap 的 --bind 绑不上它(源路径必须存在)。
+        s.ensure_placeholder(&path);
         s.audit.log(&json!({
             "event": "escalation.grant", "op": "file", "path": path,
             "access": req.access, "reason": format!("{mode:?}")
@@ -280,6 +288,9 @@ fn handle_control(state: &Arc<Mutex<State>>, line: &str) -> String {
             let token = s.tokens.issue(&path, access, ttl, &cid);
             s.last_token = token.clone();
             s.widen(&path);
+            // 授权的目标文件可能尚不存在 → 预创建空占位文件,
+            // 否则 bwrap 的 --bind 绑不上它(源路径必须存在)。
+            s.ensure_placeholder(&path);
             s.audit.log(&json!({
                 "event": "token.issued", "path": path, "access": access, "ttl_seconds": ttl
             }));

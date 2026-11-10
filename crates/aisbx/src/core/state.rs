@@ -51,6 +51,16 @@ pub struct State {
     pub violations: Vec<Violation>,
     /// 用户同意后放宽的路径(B 契约:下一次执行的策略快照使用)
     pub granted: Vec<String>,
+    /// 授权「尚不存在的文件」时由宿主预创建的**空占位文件**。
+    ///
+    /// ⚠️ 为什么需要它:Linux 的 bwrap 用 `--bind <路径> <路径>` 授权可写路径,
+    /// 而 bind 的**源路径必须存在**;沙箱里要创建的目标文件此刻还不存在 →
+    /// 绑不上 → 授权形同虚设(实测 T12「授权后重跑成功」就是这么红的:
+    /// retry 事件落了、文件却写不进)。macOS 的 Seatbelt 写的是规则、
+    /// 不要求路径存在,所以不受影响 —— 这正是三平台行为不一致的一处。
+    /// Windows 侧同理(icacls 不能对不存在的文件设 ACE),已在 broker 层
+    /// 预创建占位文件;这里让 Unix 侧用**同一套语义**。
+    pub placeholders: Vec<String>,
     /// 本次任务已放行的网络目标(host:port 或 host)。代理运行中可热更新,不需重跑。
     pub granted_nets: Vec<String>,
     /// 沙箱入口登记的真实目标进程 PID,供内核违规日志按 PID 精确归属。
@@ -74,6 +84,7 @@ impl State {
             tokens: TokenStore::default(),
             violations: Vec::new(),
             granted: Vec::new(),
+            placeholders: Vec::new(),
             granted_nets: Vec::new(),
             child_pids: Vec::new(),
             events: Vec::new(),
@@ -284,6 +295,30 @@ impl State {
             super::decision::is_prefix_hit(std::slice::from_ref(&v.path), path)
                 || super::decision::is_prefix_hit(&[path.to_string()], &v.path)
         })
+    }
+
+    /// 授权一个**尚不存在的文件**时,预创建空占位文件并登记。
+    ///
+    /// 目录不需要(它本来就存在);已存在的文件也不需要。
+    /// 创建失败不阻断授权 —— 最坏情况退回「授权无效」,而不是「授权流程卡住」。
+    pub fn ensure_placeholder(&mut self, path: &str) {
+        let p = std::path::Path::new(path);
+        if p.exists() || p.is_dir() {
+            return;
+        }
+        if let Some(parent) = p.parent() {
+            if !parent.is_dir() {
+                return;
+            }
+        }
+        if std::fs::File::create(p).is_ok()
+            && !self
+                .placeholders
+                .iter()
+                .any(|x| super::decision::compare_key(x) == super::decision::compare_key(path))
+        {
+            self.placeholders.push(path.to_string());
+        }
     }
 
     /// 新策略必须严格宽于旧策略:仅在既有白名单之外追加授权路径。

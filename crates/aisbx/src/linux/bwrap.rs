@@ -70,7 +70,13 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
     rw.sort();
     rw.dedup();
     for p in &rw {
-        if Path::new(p).is_dir() {
+        // 目录:策略白名单里的可写目录照旧 bind。
+        // **授权的单文件**也必须 bind:bwrap 的 --bind 支持文件,而只读根
+        // (--ro-bind / /)让所有文件默认只读 —— 不显式 bind 就写不了。
+        // 授权的目标文件已由宿主预创建占位文件(见 state::ensure_placeholder),
+        // 所以这里它一定存在。
+        let is_granted_file = !Path::new(p).is_dir() && ctx.granted.iter().any(|g| canon(g) == *p);
+        if Path::new(p).is_dir() || is_granted_file {
             v.push("--bind".into());
             v.push(p.clone());
             v.push(p.clone());

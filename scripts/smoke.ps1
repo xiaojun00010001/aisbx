@@ -639,6 +639,7 @@ try {
     $cp = Join-Path $root "contract"
     New-Item -ItemType Directory -Force -Path $cp | Out-Null
     # 用 WriteAllText 而不是 Out-File:PS 5.1 的 utf8 会带 BOM,JSON 解析会失败
+    Push-Progress "contract/caps"
     [System.IO.File]::WriteAllText("$cp\caps.json", ((& $bin capabilities) | Out-String))
     $cpp = Join-Path $cp "policy.json"
     $cpa = Join-Path $cp "audit.jsonl"
@@ -650,22 +651,41 @@ try {
       resources  = @{}
       broker     = @{ audit_log = $cpa; violation_capture = $true }
     } | ConvertTo-Json -Depth 5 | Set-Content $cpp -Encoding UTF8
+    # ⚠️ 这三步都**必须有界**:契约检查是纯文件处理(秒级),一旦卡住就是
+    # 出了问题(实测 Windows 冒烟 15 段 2 分跑完后卡在这里,60 分钟
+    # timeout 都救不回来 —— 因为卡住的步骤把整个 job 拖死了)。
+    # 全部改成 Start-Process + WaitForExit(超时) → 卡住时被杀,冒烟继续。
+    Push-Progress "contract/run"
     $cpe = Join-Path $cp "events.jsonl"
-    & $bin run -p $cpp --json -- "$ws\burn.exe" stderrdeny (Join-Path $out "contract.txt") > $cpe 2>$null
-    $cpRc = $LASTEXITCODE
+    # ⚠️ 不用 `Start-Process -RedirectStandardOutput`:那条路在 CI 的短路径
+    # (RUNNER~1)下会报 "The filename, directory name, or volume label syntax
+    # is incorrect."(实测踩过)。改用 cmd 的重定向(cmd 自己解析路径)。
+    $cmdline = '"{0}" run -p "{1}" -- "{2}" stderrdeny "{3}" > "{4}" 2> "{5}"' -f `
+      $bin, $cpp, "$wsurn.exe", (Join-Path $out "contract.txt"), $cpe, (Join-Path $cp "run.err")
+    $pRun = Start-Process -FilePath "cmd.exe" -NoNewWindow -PassThru `
+      -ArgumentList @('/c', $cmdline)
+    if (-not $pRun.WaitForExit(60000)) { $pRun.Kill(); Write-Host "::notice::契约用的 run 超时,已终止" }
+    $cpRc = $pRun.ExitCode
+
+    Push-Progress "contract/check"
     # 平台名取自能力报告的 backend(不写死):契约基线按平台给期望值,
     # 写死会在平台间张冠李戴(实测 macOS 被 Linux 的期望判失败)。
     $cpPlatform = (Get-Content "$cp\caps.json" -Raw | ConvertFrom-Json).backend
-    if (python scripts/contract_check.py `
-          --caps "$cp\caps.json" `
-          --baseline scripts/contract-baseline.json `
-          --platform $cpPlatform `
-          --events $cpe `
-          --audit $cpa `
-          --exit-code $cpRc) {
-      Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" $true
-    } else {
+    $cArgs = @('scripts/contract_check.py',
+      '--caps', "$cp\caps.json",
+      '--baseline', 'scripts/contract-baseline.json',
+      '--platform', $cpPlatform,
+      '--events', $cpe,
+      '--audit', $cpa,
+      '--exit-code', "$cpRc")
+    # 输出继承控制台(不重定向)→ 避开上面那条路径坑;只看退出码
+    $pChk = Start-Process -FilePath "python" -NoNewWindow -PassThru -ArgumentList $cArgs
+    if (-not $pChk.WaitForExit(30000)) {
+      $pChk.Kill()
+      Write-Host "::notice::契约检查超时,已终止"
       Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" $false
+    } else {
+      Assert "契约检查:能力/事件/审计/退出码 三平台同一份契约" ($pChk.ExitCode -eq 0)
     }
   }
 }

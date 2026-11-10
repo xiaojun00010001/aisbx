@@ -65,6 +65,8 @@ where
     let mut code: i32;
     let mut attempt = 1u32;
     let mut prev_granted: usize;
+    // 累计所有 attempt 的占位文件(任务结束时统一回收)
+    let mut placeholders: Vec<String> = Vec::new();
 
     loop {
         flush();
@@ -74,6 +76,11 @@ where
         }
         let snap = broker.snapshot();
         prev_granted = snap.granted.len();
+        for ph in &snap.placeholders {
+            if !placeholders.iter().any(|x| x == ph) {
+                placeholders.push(ph.clone());
+            }
+        }
         // 每次 attempt 换一个端口,避免上一次 relay 残留占用(TIME_WAIT / 进程组回收延迟)。
         let relay_port = std::net::TcpListener::bind("127.0.0.1:0")
             .ok()
@@ -209,6 +216,16 @@ where
     }
 
     flush();
+
+    // 回收占位文件:**只回收仍是空文件**的 —— 沙箱已写入内容的,
+    // 那是用户要的结果,必须留下(与 Windows 侧同一语义)。
+    for ph in &placeholders {
+        let empty = std::fs::metadata(ph).map(|m| m.len() == 0).unwrap_or(false);
+        if empty {
+            let _ = std::fs::remove_file(ph);
+        }
+    }
+
     Ok(code)
 }
 
