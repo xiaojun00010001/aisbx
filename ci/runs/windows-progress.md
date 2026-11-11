@@ -31,3 +31,4 @@
 - contract @ 15:05:57
 - contract/caps @ 15:05:59
 - contract/run @ 15:06:00
+- contract/check @ 15:06:23
