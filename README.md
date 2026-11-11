@@ -57,6 +57,8 @@ CI：`.github/workflows/windows-smoke.yml`（Windows 真机冒烟）与
 不依赖 GitHub API 配额；另有**三平台共用同一份**跨平台契约检查
 （`scripts/contract_check.py` + `scripts/contract-baseline.json`），
 保证能力报告键集合 / 事件名 / 审计事件类型 / 退出码语义在三平台同形。
+
+架构与实现原理（按沙箱能力与场景组织的逐系统机制说明）：[`docs/08-架构与实现原理.md`](docs/08-架构与实现原理.md)。
 失败时工作流会把完整日志自动发布为 Issue，便于无鉴权诊断。
 
 ## 文档
