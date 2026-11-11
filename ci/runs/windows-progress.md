@@ -30,3 +30,4 @@
 - T15 @ 15:05:34
 - contract @ 15:05:57
 - contract/caps @ 15:05:59
+- contract/run @ 15:06:00
