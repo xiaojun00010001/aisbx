@@ -71,6 +71,7 @@ CI：`.github/workflows/windows-smoke.yml`（Windows 真机冒烟）与
 - [docs/06-P0P1实施记录.md](docs/06-P0P1实施记录.md) — 网络强制代理 + macOS 内核违规日志采集
 - [docs/08-运行时感知通道调研.md](docs/08-运行时感知通道调研.md) — 五层感知通道模型、竞品机制重读、归属精度改造（P0）
 - [docs/09-macOS-构建产物与使用手册.md](docs/09-macOS-构建产物与使用手册.md) — **macOS 构建产物 + 命令/输出示例的使用手册（照抄即可测试）**
+- `scripts/test-ssh-policy.sh` — SSH 默认策略专项测试（工作目录读写 / 只读目录 / `.ssh` / 外网 / 脚本内混合读写）
 - [examples/policy.example.json](examples/policy.example.json) — 策略契约示例
 
 ## agent 集成
