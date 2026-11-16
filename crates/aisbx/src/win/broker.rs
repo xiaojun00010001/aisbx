@@ -528,7 +528,9 @@ fn decide_file(
                     "event": "escalation.pending", "op": "file", "path": path,
                     "reason": "needs-approval", "requested_by": req.requested_by
                 }));
-                return json_reply(false, "需要用户授权后重新执行");
+                // ⚠️ 这是「邀请宿主授权」而非「终态拒绝」→
+                // 必须带 retry_required=true(与 Unix 的 protocol::needs_approval 同构)。
+                return json_needs_approval("需要用户授权后重新执行");
             }
 
             prompt_user(&format!(
@@ -822,7 +824,38 @@ fn is_tty() -> bool {
 }
 
 fn json_reply(granted: bool, reason: &str) -> String {
-    serde_json::json!({ "granted": granted, "reason": reason }).to_string()
+    // ⚠️ 应答必须**三平台同构**:Unix 侧走 core/protocol.rs 的
+    // granted/denied/needs_approval,统一返回 4 个字段
+    // (granted / reason / effect / retry_required)。
+    // 这里原来只有 granted/reason 两个 → agent 拿不到 effect 与
+    // retry_required,无法区分「拒绝」(retry_required=false)、
+    // 「已放行待重跑」(granted=true → retry_required=true)与
+    // 「需要用户授权后重跑」(granted=false → retry_required=true)。
+    // 实测:冒烟 T2x 的 deny 行为断言在 Windows 上因此判不出「不邀请宿主」。
+    // 本函数按 granted 自动推导,与 Unix 的 protocol::granted/denied 同构;
+    // needs_approval 语义由 json_needs_approval() 单独构造。
+    json_reply_ex(
+        granted,
+        reason,
+        if granted { "retry" } else { "none" },
+        granted,
+    )
+}
+
+fn json_reply_ex(granted: bool, reason: &str, effect: &str, retry_required: bool) -> String {
+    serde_json::json!({
+        "granted": granted,
+        "reason": reason,
+        "effect": effect,
+        "retry_required": retry_required,
+    })
+    .to_string()
+}
+
+fn json_needs_approval(reason: &str) -> String {
+    // 与 Unix 的 core/protocol.rs::needs_approval 同构:
+    // granted=false、effect=retry、**retry_required=true**(邀请宿主授权)。
+    json_reply_ex(false, reason, "retry", true)
 }
 
 // ── 客户端(沙箱内执行 `aisbx escalate`) ─────────────────────────────
