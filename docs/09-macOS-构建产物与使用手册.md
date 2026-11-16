@@ -493,3 +493,82 @@ SSH 默认策略验证全部通过
 > 当前脚本如实按实现断言并把差异打印出来，避免误判为测试通过。
 >
 > 脚本全程用 `mktemp -d` 的**临时 HOME**，不会触碰你真实的 `~/.ssh`。
+
+---
+
+## 13. 后台 / 长期运行服务
+
+**可以跑长服务**，但停止方式有讲究（实测）：
+
+```bash
+cd /Users/xiaojun/Work/workspace/nomar/aisbx
+bash scripts/test-long-running.sh
+```
+
+实测输出：
+
+```text
+===== 1. 后台启动长期 HTTP 服务 =====
+  PASS  服务后台运行（launcher=1559，沙箱子进程=1561）
+===== 2. 服务运行中 status 可查 =====
+{"attempt":1,"backend":"unix","granted_nets":[],"granted_paths":[],"needs_approval":false,...}
+  PASS  status 在服务运行期间可用
+===== 3. 宿主经回环访问服务 =====
+响应: SERVICE-OK
+  PASS  回环访问服务成功
+===== 4. 正确停止：杀沙箱子进程自建的进程组 =====
+沙箱子进程 pgid=1561
+  PASS  停止后服务不可访问（无残留）
+===== 汇总 =====
+PASS=4
+FAIL=0
+SMOKE_DONE fail=0
+长期运行服务验证全部通过
+```
+
+### 13.1 手工启动与停止（可直接复制）
+
+启动（用 `set -m` 让后台作业独立进程组）：
+
+```bash
+cd /Users/xiaojun/Work/workspace/nomar/aisbx
+D=$(mktemp -d); mkdir -p "$D/ws" "$D/home"
+printf 'SERVICE-OK' > "$D/ws/index.html"
+PORT=18888
+printf '{"task":"my-service","filesystem":{"write":["%s/ws"],"read":[],"deny_escalation":[],"allow_escalation":[],"escalation":"prompt"},"network":{"loopback":true,"internet":false},"broker":{"audit_log":"%s/audit.jsonl"}}' "$D" "$D" > "$D/p.json"
+set -m
+HOME="$D/home" "$PWD/target/debug/aisbx" run -p "$D/p.json" --json -- /usr/bin/python3 -m http.server "$PORT" --directory "$D/ws" > "$D/srv.log" 2>&1 &
+LPID=$!
+set +m
+sleep 3
+CHILD=$(pgrep -P "$LPID" | head -1)
+echo "launcher=$LPID 沙箱子进程=$CHILD"
+curl -s "http://127.0.0.1:$PORT/"
+echo "临时目录=$D"
+```
+
+查询与停止：
+
+```bash
+# 把上一块打印的临时目录填到这里（或直接沿用同一终端会话的变量）
+D=<上一块打印的临时目录>
+target/debug/aisbx status -p "$D/p.json"
+
+# ⚠️ 正确停止：杀【沙箱子进程自建的进程组】，不是 launcher！
+CHILD=$(pgrep -P "$LPID" | head -1)
+CHPGID=$(ps -o pgid= -p "$CHILD" | tr -d ' ')
+kill -TERM -- "-$CHPGID"
+sleep 2
+kill "$LPID" 2>/dev/null
+curl -s --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null 2>&1 && echo "仍有残留" || echo "已干净停止"
+```
+
+### 13.2 三条必须知道的边界
+
+| 边界 | 实测结论 |
+|---|---|
+| `kill <launcher_pid>` | ❌ **沙箱子进程残留**（服务仍可访问）——launcher 没有 SIGTERM handler，进程组清理只在子进程**正常退出后**才执行 |
+| 服务中**文件**动态授权 | ⚠️ `authorize` 后 `status.granted_paths` 会更新，但**不触发重跑**（retry 计数 0）——launcher 只在子进程退出后才进入授权等待循环（`unix/run.rs:182`） |
+| 服务中**网络**授权 | ✅ 走代理通道，**运行中即时生效**，命令不重跑 |
+
+> 若服务需要在运行中动态获得**文件**权限，当前机制不支持即时生效；可行做法是让服务在启动时就声明足够白名单，或把需要动态授权的文件访问拆成独立的一次性命令（走 §6 的重跑闭环）。
