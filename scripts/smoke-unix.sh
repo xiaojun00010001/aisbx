@@ -29,7 +29,7 @@ json.dump({
         "read": [],
         "deny_escalation": [deny],
         "allow_escalation": [],
-        "escalation": "deny",
+        "escalation": "prompt",
     },
     "network": {"loopback": True, "internet": False},
     "resources": {"memory_mb_per_process": 64, "memory_mb_total": 256, "active_processes": 10},
@@ -98,6 +98,72 @@ assert "T2g token 一次性(消费成功+重放被拒)" grep -q '"event":"token.
 assert "T2h token 重放被审计" grep -q '"event":"token.reject"' "$AUDIT"
 assert "T2i 网络拒绝上报(host/ip/port)" grep -q '"op":"net"' "$AUDIT"
 
+# ── T2x deny 模式的行为契约(三平台同构)───────────────────────────────
+# deny = 一律拒绝(最严格):不自动放行,**也不邀请宿主授权**。
+# 与 prompt 的本质区别:prompt 会置 needs_approval 交宿主签 token(可重跑),
+# deny 不置 → 宿主不会被引导去授权 → 拒绝是终态。
+# ⚠️ 这里曾经三平台不一致:Unix 把 deny 也落到 needs-approval 分支 →
+#   ①launcher 白等 20 秒 ②退出码变成 3(等待授权超时)而非 1(被拒)
+#   ③审计带 retry_required:true → 等于邀请宿主去授权。
+# 断言载体:宿主侧 `aisbx escalate` 的**协议应答 JSON**(三平台同一份协议):
+#   granted / reason / effect / retry_required
+echo "[$(date +%H:%M:%S)] == T2x deny 模式行为契约 ==" | tee -a "$LOG"
+PD="$ROOT/policy-deny.json"; AD="$ROOT/audit-deny.jsonl"; TD="smokedeny-$$"
+python3 - "$PD" "$WS" "$AD" "$TD" <<'PY'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "deny"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit},
+}, open(policy, "w"), indent=2)
+PY
+# broker 的生命周期 = 一次 run → 起一个 run 让它存活,期间做裁决
+T2X_T0=$(date +%s)
+"$BIN" run -p "$PD" -- "$BURN" spin 8 >"$ROOT/t2x.out" 2>&1 &
+T2X_PID=$!
+T2X_REPLY=""
+for _ in $(seq 1 40); do
+  T2X_REPLY=$("$BIN" escalate -p "$PD" --path "$OUT/denied.txt" --access write 2>/dev/null || true)
+  [[ "$T2X_REPLY" == *'"granted"'* ]] && break
+  sleep 0.25
+done
+T2X_STATUS=$("$BIN" status -p "$PD" 2>/dev/null || true)
+wait "$T2X_PID" 2>/dev/null || true
+T2X_ELAPSED=$(( $(date +%s) - T2X_T0 ))
+echo "T2x 应答: $T2X_REPLY" | tee -a "$LOG"
+echo "T2x status: $T2X_STATUS" | tee -a "$LOG"
+# ① 拒绝
+if [[ "$T2X_REPLY" == *'"granted":false'* ]]; then pass "T2xa deny 模式提权被拒"; else bad "T2xa deny 模式提权被拒"; fi
+# ② **不邀请宿主**:retry_required 必须 false(与 prompt 的本质区别)
+if [[ "$T2X_REPLY" == *'"retry_required":false'* ]]; then pass "T2xb deny 不邀请宿主授权(retry_required=false)"; else bad "T2xb deny 不邀请宿主授权(retry_required=false)"; fi
+# ③ status 不标 needs_approval(deny 模式下没有「待用户授权」这回事)
+if [[ "$T2X_STATUS" == *'"needs_approval":false'* ]]; then pass "T2xc deny 模式 status 不标 needs_approval"; else bad "T2xc deny 模式 status 不标 needs_approval"; fi
+# ④ 审计里没有 escalation.pending(只有 prompt+无TTY 才会产生)
+if grep -q '"event":"escalation.pending"' "$AD" 2>/dev/null; then bad "T2xd deny 模式不产生 escalation.pending"; else pass "T2xd deny 模式不产生 escalation.pending"; fi
+# ⑤ 审计里的 escalation.deny 不带 retry_required(不带 = 不邀请宿主)
+if grep -q '"event":"escalation.deny"' "$AD" 2>/dev/null && ! grep '"event":"escalation.deny"' "$AD" 2>/dev/null | grep -q '"retry_required":true'; then
+  pass "T2xe deny 的审计不带 retry_required"
+else
+  bad "T2xe deny 的审计不带 retry_required"
+fi
+# ⑥ 不得空等授权超时(旧实现会白等 20 秒):整段必须明显短于 WAIT_AUTH_SECS
+if [[ $T2X_ELAPSED -lt 15 ]]; then pass "T2xf deny 模式秒回(未空等授权超时,${T2X_ELAPSED}s)"; else bad "T2xf deny 模式秒回(未空等授权超时,${T2X_ELAPSED}s)"; fi
+# 行为差异也走**同一份**契约检查脚本:
+# 结构一致 ≠ 行为一致 —— 只查「事件名在允许集合内」抓不到「某平台压根
+# 不产生这个事件」。这里要求:必须有 escalation.deny、不得有 escalation.pending。
+T2X_CAPS="$ROOT/caps-t2x.json"
+"$BIN" capabilities > "$T2X_CAPS" 2>/dev/null
+T2X_PLAT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['backend'])" "$T2X_CAPS" 2>/dev/null)
+CONTRACT_REPORT_OUT="$ROOT/contract-t2x.md" python3 scripts/contract_check.py \
+  --caps "$T2X_CAPS" --baseline scripts/contract-baseline.json \
+  --platform "$T2X_PLAT" --audit "$AD" \
+  --require-events escalation.deny --forbid-events escalation.pending >>"$LOG" 2>&1
+if [[ $? -eq 0 ]]; then pass "T2xg deny 模式行为纳入同一份契约检查"; else bad "T2xg deny 模式行为纳入同一份契约检查"; fi
+
 echo "[$(date +%H:%M:%S)] == T3 资源限制(按能力报告判定) ==" | tee -a "$LOG"
 CAP_JSON=$("$BIN" capabilities 2>>"$LOG")
 MEM_CAP=$(printf '%s' "$CAP_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["capabilities"]["memory_per_process"])' 2>/dev/null)
@@ -153,7 +219,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit},
@@ -196,7 +262,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},
@@ -229,7 +295,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},
@@ -272,7 +338,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": False},
@@ -303,7 +369,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},
@@ -357,7 +423,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit},
@@ -390,7 +456,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit},
@@ -437,7 +503,7 @@ for p, a, t in [(sys.argv[1], sys.argv[3], sys.argv[4]), (sys.argv[5], sys.argv[
     json.dump({
         "task": t,
         "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                       "allow_escalation": [], "escalation": "deny"},
+                       "allow_escalation": [], "escalation": "prompt"},
         "network": {"loopback": True, "internet": False},
         "resources": {}, "broker": {"audit_log": a},
     }, open(p, "w"), indent=2)
@@ -560,7 +626,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},
@@ -622,7 +688,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},
@@ -660,7 +726,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},
@@ -706,7 +772,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},
@@ -738,7 +804,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},
@@ -772,7 +838,7 @@ policy, ws, audit, task = sys.argv[1:]
 json.dump({
     "task": task,
     "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
-                   "allow_escalation": [], "escalation": "deny"},
+                   "allow_escalation": [], "escalation": "prompt"},
     "network": {"loopback": True, "internet": False},
     "resources": {},
     "broker": {"audit_log": audit, "violation_capture": True},

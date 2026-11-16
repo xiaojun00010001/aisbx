@@ -156,6 +156,71 @@ try {
   Write-Host ($r2.Trim())
   Assert "T2f deny_escalation 优先于 token" ($r2 -match "escalate=(?!0)\d+")
 
+  # ── T2x deny 模式的行为契约(与 Unix 同构)───────────────────────────────
+  # deny = 一律拒绝(最严格):不自动放行,**也不邀请宿主授权**。
+  # deny 与 prompt 的本质区别就在应答 JSON 的 **retry_required** 字段:
+  #   prompt(无 TTY)→ needs_approval → retry_required=true → 交宿主签 token
+  #   deny            → 拒绝是终态    → retry_required=false → 不邀请宿主
+  # 断言载体:宿主侧 `aisbx escalate` 的协议应答 JSON(三平台同一份协议)。
+  # ⚠️ 这条曾经三平台不一致:Unix 把 deny 也落到 needs-approval 分支 →
+  #   等 20 秒、退出码 3、审计带 retry_required:true。
+  Push-Progress "T2x"
+  Write-Host "[$(Get-Date -Format HH:mm:ss)] == T2x deny 模式行为契约 =="
+
+  $pd = Join-Path $root "policy-deny.json"
+  $ad = Join-Path $root "audit-deny.jsonl"
+  $td = "smokedeny-$PID"
+  @{
+    task       = $td
+    filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                    allow_escalation = @(); escalation = "deny" }
+    network    = @{ loopback = $true; internet = $false }
+    resources  = @{}
+    broker     = @{ audit_log = $ad }
+  } | ConvertTo-Json -Depth 5 | Set-Content $pd -Encoding UTF8
+
+  $t2x0 = Get-Date
+  $pdx = Start-Process -FilePath $bin -NoNewWindow -PassThru `
+    -ArgumentList @('run','-p',$pd,'--',"$ws\burn.exe",'spin','8')
+  Start-Sleep -Seconds 3
+  $rep = ""
+  for ($i = 0; $i -lt 40; $i++) {
+    $rep = (& $bin escalate -p $pd --path "$out\denied.txt" --access write 2>$null | Out-String).Trim()
+    if ($rep -match '"granted"') { break }
+    Start-Sleep -Milliseconds 250
+  }
+  $st = (& $bin status -p $pd 2>$null | Out-String)
+  if (-not $pdx.WaitForExit(30000)) { $pdx.Kill() }
+  $t2xElapsed = [int]((Get-Date) - $t2x0).TotalSeconds
+  Write-Host "T2x 应答: $rep"
+  Write-Host "T2x status: $st"
+
+  Assert "T2xa deny 模式提权被拒" ($rep -match '"granted":\s*false')
+  Assert "T2xb deny 不邀请宿主授权(retry_required=false)" ($rep -match '"retry_required":\s*false')
+  Assert "T2xc deny 模式 status 不标 needs_approval" ($st -match '"needs_approval":\s*false')
+  $adtxt = if (Test-Path $ad) { Get-Content $ad -Raw } else { "" }
+  Assert "T2xd deny 模式不产生 escalation.pending" (-not ($adtxt -match '"event":"escalation.pending"'))
+  Assert "T2xe deny 的审计不带 retry_required" `
+    (($adtxt -match '"event":"escalation.deny"') -and (-not ($adtxt -match '"event":"escalation.deny"[^\r\n]*"retry_required":true')))
+  Assert "T2xf deny 模式秒回(未空等授权超时)" ($t2xElapsed -lt 15)
+
+  # 行为差异也走**同一份**契约检查脚本(--forbid-events / --require-events):
+  # 结构一致 ≠ 行为一致 —— 只查「事件名在允许集合内」抓不到「某平台压根
+  # 不产生这个事件」。这里要求:必须有 escalation.deny、不得有 escalation.pending。
+  $cpCaps2 = Join-Path $root "caps-t2x.json"
+  [System.IO.File]::WriteAllText($cpCaps2, ((& $bin capabilities) | Out-String))
+  $cpPlat2 = (Get-Content $cpCaps2 -Raw | ConvertFrom-Json).backend
+  $env:PYTHONIOENCODING = "utf-8"
+  $t2xArgs = @('scripts/contract_check.py',
+    '--caps', $cpCaps2,
+    '--baseline', 'scripts/contract-baseline.json',
+    '--platform', $cpPlat2,
+    '--audit', $ad,
+    '--require-events', 'escalation.deny',
+    '--forbid-events', 'escalation.pending')
+  & python @t2xArgs 2>&1 | ForEach-Object { Write-Host $_ }
+  Assert "T2xg deny 模式行为纳入同一份契约检查" ($LASTEXITCODE -eq 0)
+
   # ── T3 资源限制 ──────────────────────────────────────────────────
   Push-Progress "T3"
   Write-Host "[$(Get-Date -Format HH:mm:ss)] == T3 资源限制(单进程 64MB / 全任务 256MB / 进程数 10) =="

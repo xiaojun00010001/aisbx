@@ -210,8 +210,7 @@ fn cmd_escalate(args: &[String]) -> Result<i32, String> {
                 "exe": std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default()
             }),
         };
-        let _ = policy;
-        unix::broker::escalate_client(&req)
+        unix::broker::escalate_client(&policy, &req)
     }
     #[cfg(not(any(windows, unix)))]
     {

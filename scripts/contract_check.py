@@ -93,6 +93,10 @@ def main():
     ap.add_argument("--audit", default="", help="审计 JSONL")
     ap.add_argument("--exit-code", type=int, default=None, help="被测命令的退出码")
     ap.add_argument("--out", default="", help="把报告另存到该文件(便于随 CI 结果回写)")
+    ap.add_argument("--require-events", default="",
+                    help="审计里**必须**出现的事件名(逗号分隔);行为差异也纳入契约")
+    ap.add_argument("--forbid-events", default="",
+                    help="审计里**不得**出现的事件名(逗号分隔)")
     args = ap.parse_args()
     global REPORT_OUT
     REPORT_OUT = (args.out or "").strip()
@@ -201,6 +205,29 @@ def main():
             not unknown,
             "越界: %s" % unknown if unknown else "(共 %d 种)" % len(auds),
         )
+        # ── 行为断言:某事件**必须**出现 / **不得**出现 ──────────────────
+        # 结构一致 ≠ 行为一致:只查「事件名在允许集合内」抓不到
+        # 「某个平台压根不产生这个事件」这类差异(实测 Unix 的 deny 模式
+        # 少一个 escalation.pending 就是这样溜过去的)。
+        def _split(v):
+            return set(x.strip() for x in v.split(",") if x.strip())
+
+        must = _split(args.require_events) | set(base.get("audit_events_required", []))
+        forbid = _split(args.forbid_events) | set(base.get("audit_events_forbidden", []))
+        if must:
+            missing = sorted(must - auds)
+            check(
+                "审计里必须出现的事件都在",
+                not missing,
+                "缺 %s" % missing if missing else "(共 %d 种)" % len(auds),
+            )
+        if forbid:
+            present = sorted(forbid & auds)
+            check(
+                "审计里不得出现的事件都没出现",
+                not present,
+                "出现了 %s" % present if present else "(共 %d 种)" % len(auds),
+            )
 
     # ── 4. 退出码语义 ──────────────────────────────────────────────────
     if args.exit_code is not None:

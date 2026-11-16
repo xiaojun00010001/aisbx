@@ -10,11 +10,14 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EscalationMode {
-    /// 越界请求弹到终端问用户(非 TTY 自动 fail-closed 拒绝)
+    /// 越界请求弹到终端问用户(非 TTY 自动 fail-closed 拒绝)。
+    /// ⚠️ 非 TTY 时**交宿主授权通道**:置 needs_approval,由宿主签 token 后重跑。
     Prompt,
-    /// 按 allow 规则自动授权,不在 allow 内一律拒绝
+    /// 按 allow 规则自动授权,不在 allow 内**一律拒绝**
+    /// (拒绝即终态:不置 needs_approval、不邀请宿主授权)。
     Auto,
-    /// 一律拒绝(最严格)
+    /// 一律拒绝(最严格):不自动放行,**也不邀请宿主授权**
+    /// (无 token 时直接拒;审计 escalation.deny 且不带 retry_required)。
     Deny,
 }
 

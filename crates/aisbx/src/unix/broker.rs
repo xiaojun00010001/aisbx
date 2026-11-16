@@ -227,31 +227,89 @@ fn decide_file(s: &mut State, req: &EscRequest) -> String {
         };
     }
 
-    // 3) 策略裁决
+    // 3) 按模式裁决 —— 与 Windows 侧**同构**(win/broker.rs:517-549)。
+    //
+    // ⚠️ 这里曾经把「模式不允许」与「需要用户授权」压成同一个出口:
+    //   Deny / Auto 未命中 都落到 needs-approval 分支 → ①launcher 白等 20s、
+    //   ②退出码变成 3(等待授权超时)而非 1(被拒)、
+    //   ③审计里带 retry_required:true → 语义上等于「deny 模式也在邀请宿主授权」。
+    // 而契约写死的是(aisbx-policy/src/lib.rs:9-19):
+    //   Deny   = 一律拒绝(最严格)      → 不邀请宿主
+    //   Auto   = 按 allow 前缀放行,不在其中**一律拒绝** → 不邀请宿主
+    //   Prompt = 问用户;非 TTY 交宿主授权通道 → 只有它才邀请
     let mode = s.policy.escalation_mode();
-    let auto_ok = matches!(mode, EscalationMode::Auto)
-        && decision::is_prefix_hit(&s.policy.filesystem.allow_escalation, &path);
-    let prompt_ok = matches!(mode, EscalationMode::Prompt) && decision::has_tty();
+    let granted = match mode {
+        EscalationMode::Deny => false,
+        EscalationMode::Auto => {
+            decision::is_prefix_hit(&s.policy.filesystem.allow_escalation, &path)
+        }
+        EscalationMode::Prompt => {
+            // 无交互终端(agent / CI)没法就地问人 → 交给宿主授权通道:
+            // 置 needs_approval,launcher 会等用户同意、并以更宽的策略快照重跑
+            // (B 契约,与 Windows 侧语义一致)。
+            if !decision::has_tty() {
+                s.violation(req, "file", "needs-approval");
+                s.audit.log(&json!({
+                    "event": "escalation.pending", "op": "file", "path": path,
+                    "reason": "needs-approval"
+                }));
+                return protocol::needs_approval("需要用户授权后重新执行");
+            }
+            // ⚠️ 有 TTY 时**真的问用户** —— 原来这里是「有 TTY 就静默放行」,
+            // 与 Windows 的 prompt_user 语义不同(那才是「问用户」)。
+            prompt_user(&format!(
+                "沙箱请求{}:{}\n同意? [y/N] ",
+                if req.access.eq_ignore_ascii_case("write") {
+                    "写入"
+                } else {
+                    "读取"
+                },
+                path
+            ))
+        }
+    };
 
-    if auto_ok || prompt_ok {
-        s.widen(&path);
-        // 授权的目标文件可能尚不存在 → 预创建空占位文件,
-        // 否则 bwrap 的 --bind 绑不上它(源路径必须存在)。
-        s.ensure_placeholder(&path);
+    if !granted {
+        // 拒绝就只是拒绝:**不置 needs_approval**、**不带 retry_required**
+        // → 宿主不会因此被邀请去签 token → 模式的严格性得以保持。
+        // reason 用 policy-denied(≠ needs-approval)→ 不进 pending 列表:
+        // 策略已经定了的事,不该出现在「待用户授权」里(问了也是白问)。
+        s.violation(req, "file", "policy-denied");
         s.audit.log(&json!({
-            "event": "escalation.grant", "op": "file", "path": path,
-            "access": req.access, "reason": format!("{mode:?}")
+            "event": "escalation.deny", "op": "file", "path": path,
+            "reason": format!("{mode:?}:user-or-policy")
         }));
-        return protocol::granted("策略已允许,下一次执行生效");
+        return protocol::denied("授权被拒绝");
     }
 
-    // 4) 需要用户授权:记录真实 violation,要求宿主签发后重跑
-    s.violation(req, "file", "needs-approval");
+    // 4) 放行:授权的目标文件可能尚不存在 → 预创建空占位文件,
+    //    否则 bwrap 的 --bind 绑不上它(源路径必须存在)。
+    s.widen(&path);
+    s.ensure_placeholder(&path);
     s.audit.log(&json!({
-        "event": "escalation.deny", "op": "file", "path": path,
-        "reason": format!("{mode:?}:user-or-policy"), "retry_required": true
+        "event": "escalation.grant", "op": "file", "path": path,
+        "access": req.access, "reason": format!("{mode:?}")
     }));
-    protocol::needs_approval("需要用户授权后重新执行")
+    protocol::granted("策略已允许,下一次执行生效")
+}
+
+/// 终端问用户:与 Windows 侧 prompt_user(win/broker.rs:803)同构。
+///
+/// 非 TTY 一律 fail-closed —— 注释的本意是「没有交互终端就别指望问用户」,
+/// 不能反过来当成「有人在就放行」。
+fn prompt_user(msg: &str) -> bool {
+    use std::io::Write;
+    eprint!("{msg}");
+    let _ = std::io::stderr().flush();
+    if !decision::has_tty() {
+        eprintln!("[aisbx] stdin 非 TTY,按 fail-closed 拒绝");
+        return false;
+    }
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim(), "y" | "Y" | "yes" | "是")
 }
 
 fn handle_control(state: &Arc<Mutex<State>>, line: &str) -> String {
@@ -343,9 +401,16 @@ fn handle_control(state: &Arc<Mutex<State>>, line: &str) -> String {
 }
 
 /// 沙箱内 `aisbx escalate`:连接 esc.sock(路径由 launcher 注入环境变量)。
-pub fn escalate_client(req: &EscRequest) -> Result<i32, String> {
-    let dir = std::env::var("AISBX_BROKER_DIR")
-        .map_err(|_| "不在沙箱内:缺少 AISBX_BROKER_DIR".to_string())?;
+pub fn escalate_client(policy: &Policy, req: &EscRequest) -> Result<i32, String> {
+    // ⚠️ 沙箱内由 launcher 注入 AISBX_BROKER_DIR;**宿主侧**(agent 直接发起
+    // 提权请求)没有这个变量 → 用 policy.task 推导,与 Broker::start 用的是
+    // 同一个 runtime_dir。
+    // Windows 侧 win::broker::escalate_client(&policy, …) 本来就支持宿主侧调用,
+    // 这里补齐 Unix 侧 —— 两平台的「谁能发起提权」从此一致。
+    let dir = match std::env::var("AISBX_BROKER_DIR") {
+        Ok(d) if !d.is_empty() => PathBuf::from(d),
+        _ => runtime_dir(&policy.task),
+    };
     let reply = request(
         Path::new(&dir).join("esc.sock"),
         &serde_json::to_string(req).unwrap(),
