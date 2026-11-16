@@ -5,6 +5,32 @@ use std::ffi::c_int;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
+
+/// 当前活跃沙箱子进程的 pgid(0 = 无)。
+/// SIGTERM/SIGINT handler 用它把整棵进程树一起带走 ——
+/// 子进程在 pre_exec 里 setpgid(0,0) 自建进程组,只杀 launcher 会留下服务进程。
+static ACTIVE_PGID: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn on_terminate(sig: c_int) {
+    // async-signal-safe:只调 kill 与 _exit,不碰锁/分配/标准库 I/O。
+    let pgid = ACTIVE_PGID.load(Ordering::Relaxed);
+    if pgid > 0 {
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    unsafe {
+        libc::_exit(128 + sig);
+    }
+}
+
+fn install_signal_handlers() {
+    unsafe {
+        libc::signal(libc::SIGTERM, on_terminate as *const () as usize);
+        libc::signal(libc::SIGINT, on_terminate as *const () as usize);
+    }
+}
 
 use aisbx_policy::Policy;
 use serde_json::json;
@@ -44,6 +70,7 @@ where
     F: Fn(&Policy, &[String], &RunCtx) -> Result<Vec<String>, String>,
 {
     let command_id = random_token();
+    install_signal_handlers();
     let broker = Broker::start(policy, &command_id)?;
     let emit = |v: serde_json::Value| {
         broker.emit(v.clone());
@@ -62,7 +89,8 @@ where
         }
     };
 
-    let mut code: i32;
+    // restart 分支会 continue(不写 code)→ 必须给初值,否则 break 时可能未初始化。
+    let mut code: i32 = 1;
     let mut attempt = 1u32;
     let mut prev_granted: usize;
     // 累计所有 attempt 的占位文件(任务结束时统一回收)
@@ -106,7 +134,25 @@ where
             None
         };
         emit(json!({"event": "spawned", "attempt": attempt, "cmd": cmd}));
-        let outcome = spawn(&argv, &ctx, policy)?;
+        // 运行中授权检测:只比较本轮开始时的 granted 数 ——
+        // 短命令在授权前就退出,回调不会被触发,既有语义完全不变;
+        // 长服务则在签 token 后立刻被发现,进入 restart 分支。
+        let check_restart = || broker.snapshot().granted.len() > prev_granted;
+        let outcome = spawn(&argv, &ctx, policy, &check_restart)?;
+        if outcome.restart {
+            emit(json!({
+                "event": "retry", "from": attempt, "to": attempt + 1,
+                "reason": "user-approved-while-running", "command_id": command_id,
+                "granted": broker.snapshot().granted
+            }));
+            flush();
+            attempt += 1;
+            if attempt > MAX_ATTEMPTS {
+                break;
+            }
+            continue;
+        }
+        ACTIVE_PGID.store(0, Ordering::SeqCst);
         code = outcome.code;
         emit(json!({"event": "exit", "attempt": attempt, "code": code}));
         flush();
@@ -235,6 +281,10 @@ where
 
 pub struct SpawnOutcome {
     pub code: i32,
+    /// 子进程仍在运行时检测到【新授权到达】:已终止当前进程组,
+    /// 调用方应**用新策略快照重跑**(长服务获得新权限的唯一方式 ——
+    /// macOS Seatbelt 的 profile 在 sandbox-exec 启动时一次性固化,无法热更新)。
+    pub restart: bool,
     pub pid: u32,
     /// 进程组 ID(入口 setpgid(0,0) 后即组长)。负号 kill 即作用于整个进程组。
     pub pgid: u32,
@@ -254,6 +304,7 @@ fn spawn(
     argv: &[String],
     ctx: &RunCtx,
     policy: &aisbx_policy::Policy,
+    check_restart: &dyn Fn() -> bool,
 ) -> Result<SpawnOutcome, String> {
     let program = argv.first().ok_or("空的沙箱命令")?;
     let mut c = Command::new(program);
@@ -316,6 +367,7 @@ fn spawn(
     let mut child = c.spawn().map_err(|e| format!("启动沙箱命令失败: {e}"))?;
     let pid = child.id();
     let pgid = pid as c_int;
+    ACTIVE_PGID.store(pgid, Ordering::SeqCst);
 
     // L1:转发 stderr 的同时扫描被拒路径。stderr 管道要等【整个进程组】被回收
     // 才会 EOF(孙进程也持有它),故结果经 channel 交回,由调用方在 kill 之后接收。
@@ -378,6 +430,23 @@ fn spawn(
                     tree.push(p);
                 }
             }
+            // ②a 运行中授权检测:长服务不退出,但宿主可能在任意时刻签 token。
+            //     一旦 granted 增长 → 终止当前进程组 → 用新快照重跑(见 run_loop)。
+            if check_restart() {
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+                ACTIVE_PGID.store(0, Ordering::SeqCst);
+                let _ = child.wait();
+                return Ok(SpawnOutcome {
+                    code: 0,
+                    restart: true,
+                    pid,
+                    pgid: pgid as u32,
+                    tree,
+                    stderr_rx: None,
+                });
+            }
             // ② 再看子进程是否已退出。
             let st = match child.try_wait() {
                 Ok(Some(st)) => Some(st),
@@ -402,6 +471,22 @@ fn spawn(
                 }
             }
         } else {
+            // 非 L2 采集路径:同样要在服务运行期间检测新授权。
+            if check_restart() {
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+                ACTIVE_PGID.store(0, Ordering::SeqCst);
+                let _ = child.wait();
+                return Ok(SpawnOutcome {
+                    code: 0,
+                    restart: true,
+                    pid,
+                    pgid: pgid as u32,
+                    tree,
+                    stderr_rx: None,
+                });
+            }
             match child.try_wait() {
                 Ok(Some(st)) => break st,
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(POLL_MS)),
@@ -415,6 +500,7 @@ fn spawn(
         code: status
             .code()
             .unwrap_or(if status.success() { 0 } else { 1 }),
+        restart: false,
         pid,
         pgid: pgid as u32,
         tree,

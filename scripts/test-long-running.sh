@@ -5,14 +5,10 @@
 #   1. 后台启动长期 HTTP 服务（bash 作业控制 set -m，launcher 独立进程组）
 #   2. 服务运行期间 `aisbx status` 可查
 #   3. 宿主经回环访问服务成功（网络默认仅回环）
-#   4. **正确停止**：杀沙箱子进程自建的进程组 → 无残留
-#   5. 边界记录：直接 kill launcher 会残留；文件动态授权在服务中不触发重跑
-#
-# ⚠️ 关键机制（实测）：沙箱子进程在 pre_exec 里 setpgid(0,0) 自建进程组，
-#    因此：
-#      · kill <launcher_pid>          → 只杀 launcher，**沙箱服务残留**
-#      · kill -- -<launcher_pgid>     → 同样杀不到（子进程不在该组）
-#      · kill -- -<沙箱子进程pgid>    → ✅ 正确停止
+#   4. 停止：直接 kill launcher → launcher 的 SIGTERM handler 会连带杀掉
+#      沙箱进程组 → 无残留（修复前会残留，本脚本是回归保护）
+#   5. 运行中文件动态授权 → authorize 触发「用新策略快照重跑」
+#      （服务会重启一次，日志出现 retry from:1 to:2）
 #
 # 全程 mktemp -d，不触碰真实 ~/.ssh；退出前确保清理所有子进程。
 
@@ -85,26 +81,25 @@ else
   bad "回环访问服务成功"
 fi
 
-hr "4. 正确停止：杀沙箱子进程自建的进程组"
-CHPGID=$(ps -o pgid= -p "$CHILD" | tr -d ' ')
-echo "沙箱子进程 pgid=$CHPGID" | tee -a "$LOG"
-kill -TERM -- "-$CHPGID" 2>/dev/null || true
+hr "4. 停止：kill launcher（SIGTERM handler 连带杀进程组）"
+echo "沙箱子进程=$CHILD（由 SIGTERM handler 连带回收）" | tee -a "$LOG"
+kill "$LPID" 2>/dev/null || true
 sleep 2
 if curl -s --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null 2>&1; then
-  bad "停止后服务不可访问（无残留）"
+  bad "kill launcher 后服务不可访问（无残留）"
   # 兜底清理
-  kill -9 -- "-$CHPGID" 2>/dev/null || true
+  CHPGID=$(ps -o pgid= -p "$CHILD" | tr -d ' ')
+  [ -n "$CHPGID" ] && kill -9 -- "-$CHPGID" 2>/dev/null || true
   pkill -9 -f "python3 -m http.server $PORT" 2>/dev/null || true
 else
-  pass "停止后服务不可访问（无残留）"
+  pass "kill launcher 后服务不可访问（无残留）"
 fi
-kill "$LPID" 2>/dev/null || true
 wait "$LPID" 2>/dev/null || true
 
 hr "5. 边界记录（不是失败项）"
-note "直接 kill <launcher_pid> 会残留沙箱子进程（launcher 无 SIGTERM handler）"
-note "服务中文件动态授权不触发重跑：launcher 只在子进程退出后才进入授权等待循环"
+note "服务中文件授权 = 用新策略快照【重跑】（服务重启一次），macOS Seatbelt profile 无法热更新"
 note "网络授权走代理通道，运行中即时生效（不需重跑）"
+note "重跑上限 MAX_ATTEMPTS=3，超过后不再重启"
 
 hr "汇总"
 echo "PASS=$(grep -c '  PASS  ' "$LOG")" | tee -a "$LOG"

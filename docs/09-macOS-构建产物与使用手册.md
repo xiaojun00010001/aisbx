@@ -516,9 +516,8 @@ bash scripts/test-long-running.sh
 ===== 3. 宿主经回环访问服务 =====
 响应: SERVICE-OK
   PASS  回环访问服务成功
-===== 4. 正确停止：杀沙箱子进程自建的进程组 =====
-沙箱子进程 pgid=1561
-  PASS  停止后服务不可访问（无残留）
+===== 4. 停止：kill launcher（SIGTERM handler 连带杀进程组） =====
+  PASS  kill launcher 后服务不可访问（无残留）
 ===== 汇总 =====
 PASS=4
 FAIL=0
@@ -550,25 +549,21 @@ echo "临时目录=$D"
 查询与停止：
 
 ```bash
-# 把上一块打印的临时目录填到这里（或直接沿用同一终端会话的变量）
-D=<上一块打印的临时目录>
+# 在同一终端会话沿用变量（LPID / D / PORT）
 target/debug/aisbx status -p "$D/p.json"
 
-# ⚠️ 正确停止：杀【沙箱子进程自建的进程组】，不是 launcher！
-CHILD=$(pgrep -P "$LPID" | head -1)
-CHPGID=$(ps -o pgid= -p "$CHILD" | tr -d ' ')
-kill -TERM -- "-$CHPGID"
-sleep 2
+# 直接 kill launcher 即可 —— SIGTERM handler 会连带杀掉沙箱进程组
 kill "$LPID" 2>/dev/null
+sleep 2
 curl -s --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null 2>&1 && echo "仍有残留" || echo "已干净停止"
 ```
 
-### 13.2 三条必须知道的边界
+### 13.2 两个已修复的问题 + 一条边界
 
-| 边界 | 实测结论 |
-|---|---|
-| `kill <launcher_pid>` | ❌ **沙箱子进程残留**（服务仍可访问）——launcher 没有 SIGTERM handler，进程组清理只在子进程**正常退出后**才执行 |
-| 服务中**文件**动态授权 | ⚠️ `authorize` 后 `status.granted_paths` 会更新，但**不触发重跑**（retry 计数 0）——launcher 只在子进程退出后才进入授权等待循环（`unix/run.rs:182`） |
-| 服务中**网络**授权 | ✅ 走代理通道，**运行中即时生效**，命令不重跑 |
+| 项 | 之前 | 现在 |
+|---|---|---|
+| `kill <launcher_pid>` | ❌ 沙箱子进程残留（launcher 无 SIGTERM handler） | ✅ launcher 装了 SIGTERM/SIGINT handler，先 `kill(-pgid, SIGKILL)` 再 `_exit` → **无残留** |
+| 服务中**文件**动态授权 | ⚠️ `authorize` 后不触发重跑（只在子进程退出后才检查 granted） | ✅ spawn 等待循环也检测 granted 增长 → 终止当前进程组 → **用新策略快照重跑**；日志出现 `retry ... reason:user-approved-while-running`，服务进程重启一次 |
+| 服务中**网络**授权 | ✅ 走代理通道，运行中即时生效，命令不重跑 | ✅ 不变 |
 
-> 若服务需要在运行中动态获得**文件**权限，当前机制不支持即时生效；可行做法是让服务在启动时就声明足够白名单，或把需要动态授权的文件访问拆成独立的一次性命令（走 §6 的重跑闭环）。
+> ⚠️ **文件授权是「重启生效」，不是 in-place**：macOS Seatbelt 的 profile 在 `sandbox-exec` 启动时一次性固化，运行中无法热更新。所以服务会**重启一次**（内存状态丢失、连接断开），但新权限立即生效。重跑上限 `MAX_ATTEMPTS=3`。
