@@ -582,3 +582,145 @@ curl -s --max-time 2 "http://127.0.0.1:$PORT/" >/dev/null 2>&1 && echo "仍有�
 | 服务中**网络**授权 | ✅ 走代理通道，运行中即时生效，命令不重跑 | ✅ 不变 |
 
 > ⚠️ **文件授权是「重启生效」，不是 in-place**：macOS Seatbelt 的 profile 在 `sandbox-exec` 启动时一次性固化，运行中无法热更新。所以服务会**重启一次**（内存状态丢失、连接断开），但新权限立即生效。重跑上限 `MAX_ATTEMPTS=3`。
+
+---
+
+## 14. 所有失败案例的重新授权发起执行
+
+前面章节出现了多类「失败 / 被拒」场景，但**不是所有失败都能重新授权**。按拒绝层分类如下：
+
+| 失败案例 | 出现位置 | 拒绝层 | 能否重新授权 | 重新发起执行方式 |
+|---|---|---|---|---|
+| 白名单外写文件 | §3 场景 B / §5 / §6 / §12 案例 5 | Seatbelt syscall（内核 EPERM） | ✅ | `authorize --path --access write` → launcher 自动重跑（retry 1→2） |
+| 脚本内写其他目录 | §12 案例 5 `OTHER_WRITE=denied` | 同上 | ✅ | 同上 |
+| 外网连接（HTTP 代理） | §7 / §12 案例 4 | 代理 `proxy.deny` | ✅ | `authorize --host --port` → **不重跑**，代理即时放行，程序重发请求 |
+| 外网连接（SOCKS5） | `smoke-unix.sh` T8 | SOCKS5 代理 | ✅ | 同上 |
+| `.ssh` 敏感目录读写 | §12 案例 3 | Seatbelt **显式** `deny file-read*` | ❌ | 显式 deny 优先于白名单，**无授权入口**；只能改策略或换路径 |
+| `deny` 模式拒绝 | §5 | 策略层（终态） | ❌ | `retry_required:false` + `needs_approval:false`；改成 `escalation:"prompt"` 重新 run |
+| 无真实越界就授权网络 | `smoke-unix.sh` T9b | fail-closed | ❌ | 必须先让代理真实观察到拒绝，否则返回 `authorize.reject{reason:"no-real-violation"}` |
+
+> 约定：**运行时审批能力不是所有环境都能实现，不必强求**。下面两类「可授权」案例依赖该能力；
+> 不支持的环境按 §12 的 `AISBX_SKIP_AUTH_CASE=1` 跳过即可，不计 FAIL。
+
+### 14.1 文件类失败：授权 → 自动重跑
+
+整块复制执行（第一次写必然被拒，宿主授权后 launcher 用新策略快照重跑）：
+
+```bash
+cd /Users/xiaojun/Work/workspace/nomar/aisbx
+BIN="$PWD/target/debug/aisbx"
+BURN="$PWD/target/debug/examples/burn"
+D=$(mktemp -d); mkdir -p "$D/ws" "$D/out"
+printf '{"task":"reauth-file-%s","filesystem":{"write":["%s/ws"],"read":[],"deny_escalation":[],"allow_escalation":[],"escalation":"prompt"},"network":{"loopback":true,"internet":false},"broker":{"audit_log":"%s/audit.jsonl"}}' "$(date +%s)" "$D" "$D" > "$D/p.json"
+"$BIN" run -p "$D/p.json" --json -- "$BURN" retryflow "$D/out/x.txt" grant >"$D/run.out" 2>&1 &
+PID=$!
+sleep 2
+echo "=== status(待授权) ==="
+"$BIN" status -p "$D/p.json"
+echo "=== authorize(签发一次性 token) ==="
+"$BIN" authorize -p "$D/p.json" --path "$D/out" --access write --ttl-seconds 120
+wait "$PID"
+echo "=== 重跑结果 ==="
+grep -E 'first_write|wrote=|"event":"retry"|"event":"exit"' "$D/run.out"
+echo "=== 结果文件 ==="
+cat "$D/out/x.txt"
+echo "=== spawned 次数(应为 2) ==="
+grep -c '"event":"spawned"' "$D/audit.jsonl"
+echo "临时目录: $D"
+```
+
+实测输出（路径简化为 `...`）：
+
+```text
+=== status(待授权) ===
+{"attempt":1,"backend":"unix","granted_nets":[],"granted_paths":[],"needs_approval":true,
+ "pending":[{"access":"write","attributed":true,"host":"","kind":"file",
+             "path":".../out/x.txt","port":0,"precision":"reported","source":"explicit"}],
+ "retries":0,"violations_total":2}
+=== authorize(签发一次性 token) ===
+{"access":"write","expires_in":120,"granted":true,"path":".../out","token":"bd1893..."}
+=== 重跑结果 ===
+first_write=denied
+{"attempt":1,"code":1,"event":"exit"}
+{"command_id":"45ab629f...","event":"retry","from":1,"reason":"user-approved","to":2}
+wrote=ok
+{"attempt":2,"code":0,"event":"exit"}
+=== 结果文件 ===
+x
+=== spawned 次数(应为 2) ===
+2
+```
+
+**判据**：`needs_approval:true` + `pending[]` 有具体 `path`/`access` → 可授权。
+`attempt:1` 被拒 → `event:"retry"` → `attempt:2` 成功（每 run 最多 3 轮）。
+重跑的载体是**新策略快照**，不是 in-place 放宽。
+
+### 14.2 网络类失败：授权 → 即时生效（不重跑）
+
+整块复制执行（先等代理观察到真实拒绝，再按 host:port 放行）：
+
+```bash
+cd /Users/xiaojun/Work/workspace/nomar/aisbx
+BIN="$PWD/target/debug/aisbx"
+BURN="$PWD/target/debug/examples/burn"
+D=$(mktemp -d); mkdir -p "$D/ws"
+printf '{"task":"reauth-net-%s","filesystem":{"write":["%s/ws"],"read":[],"deny_escalation":[],"allow_escalation":[],"escalation":"prompt"},"network":{"loopback":true,"internet":false},"broker":{"audit_log":"%s/audit.jsonl"}}' "$(date +%s)" "$D" "$D" > "$D/p.json"
+"$BIN" run -p "$D/p.json" --json -- "$BURN" proxy example.com 443 >"$D/run.out" 2>&1 &
+PID=$!
+for i in $(seq 1 100); do
+  grep -q '"kind":"net"' "$D/audit.jsonl" 2>/dev/null && break
+  sleep 0.2
+done
+echo "=== 拒绝阶段 ==="
+cat "$D/run.out"
+echo "=== status(代理观察到的精确目标) ==="
+"$BIN" status -p "$D/p.json"
+echo "=== authorize(按 host:port 放行) ==="
+"$BIN" authorize -p "$D/p.json" --host example.com --port 443
+wait "$PID"
+echo "=== 授权后(同一进程内即时生效) ==="
+cat "$D/run.out"
+echo "=== net.grant 审计 ==="
+grep '"event":"net.grant"' "$D/audit.jsonl"
+echo "=== spawned 次数(应为 1) ==="
+grep -c '"event":"spawned"' "$D/audit.jsonl"
+echo "临时目录: $D"
+```
+
+实测输出（路径 / command_id 简化）：
+
+```text
+=== 拒绝阶段 ===
+{"attempt":1,"cmd":[".../burn","proxy","example.com","443"],"event":"spawned"}
+=== status(代理观察到的精确目标) ===
+{"attempt":1,"backend":"unix","granted_nets":[],"granted_paths":[],"needs_approval":false,
+ "pending":[{"access":"","attributed":true,"host":"example.com","kind":"net",
+             "path":"","port":443,"precision":"exact","source":"proxy"}],
+ "retries":0,"violations_total":1}
+=== authorize(按 host:port 放行) ===
+{"granted":true,"host":"example.com","port":443,"scope":"task"}
+rc=0
+=== 授权后(同一进程内即时生效) ===
+proxy_status=200 target=example.com:443
+{"attempt":1,"code":0,"event":"exit"}
+=== net.grant 审计 ===
+{"command_id":"1282e5dd...","event":"net.grant","host":"example.com","port":443,"scope":"task","target":"example.com:443"}
+=== spawned 次数(应为 1) ===
+1
+```
+
+**判据**：`pending[]` 里 `kind:"net"` + `source:"proxy"` + `precision:"exact"` → 可授权。
+注意网络场景的 `needs_approval:false`（**不触发重跑**），不能用文件场景的判据去判断。
+`authorize` 前必须有代理真实观察到的拒绝，否则 `authorize.reject{reason:"no-real-violation"}`（fail-closed）。
+授权后 `proxy_status` 从 403 变 200，`spawned` 仍为 1 → **同一进程内即时生效，不重跑**。
+
+### 14.3 不可授权的失败：只能改策略或换路径
+
+| 场景 | 实测表现 | 为什么不能授权 |
+|---|---|---|
+| `.ssh` 敏感目录（§12 案例 3） | `ls`/`cat`/写全部 `Operation not permitted`，宿主文件未变 | Seatbelt profile 的 `(deny file-read* (subpath "$HOME/.ssh"))` 是**显式 deny**，优先于任何白名单；框架不提供绕过入口 |
+| `deny` 模式（§5 案例） | `{"granted":false,"reason":"授权被拒绝","effect":"none","retry_required":false}` + `needs_approval:false` | 策略层已声明拒绝是终态，不邀请宿主授权；要改为 `escalation:"prompt"` 后**重新 run** |
+| 无真实越界的网络（T9b） | `authorize --host never-observed.invalid` 返回非 0 | fail-closed：代理没观察过该目标，凭空签授权会打开口子 |
+
+> 小结：**文件越界看 `needs_approval` + `pending` → 授权 → 重跑；网络越界看 `pending.kind=net` → 授权 → 不重跑；
+> 显式 deny 与 `deny` 模式没有授权入口，只能改策略重新发起。**
