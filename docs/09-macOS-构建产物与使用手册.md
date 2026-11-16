@@ -437,7 +437,13 @@ T2x status: {...,"needs_approval":false,"pending":[]}
 ```bash
 cd /Users/xiaojun/Work/workspace/nomar/aisbx
 bash scripts/test-ssh-policy.sh
+
+# 若环境不提供运行时审批能力,跳过案例 6(只记 NOTE,不计 FAIL):
+AISBX_SKIP_AUTH_CASE=1 bash scripts/test-ssh-policy.sh
 ```
+
+> 约定：**运行时的审批能力不是所有环境都能实现，不必强求**。案例 6 依赖该能力，
+> 不支持的环境用 `AISBX_SKIP_AUTH_CASE=1` 跳过即可，其余案例照常验证。
 
 实测输出：
 
@@ -479,8 +485,17 @@ OTHER_WRITE=denied
 TMP_WRITE=ok
   PASS  脚本内:工作目录可读写、其他目录只读、tmp 可写
 
+===== 6. 失败 → 授权 → 成功访问（B 契约闭环） =====
+阶段1 失败: first_write=denied {"granted":false,"reason":"需要用户授权后重新执行","effect":"retry","retry_required":true}
+阶段2 待授权: {"needs_approval":true,"pending":[{"access":"write","path":".../other/after-auth.txt",...}]}
+阶段2 授权: {"granted":true,"path":".../other","token":"2ea7ec39..."}
+阶段3 成功: {"event":"retry","from":1,"to":2} wrote=ok {"attempt":2,"code":0,"event":"exit"}
+阶段3 目标内容: x
+  PASS  失败→授权→成功访问（只读目录内文件，授权后写入并读回成功）
+  NOTE  此案例依赖运行时审批闭环；不支持的环境设 AISBX_SKIP_AUTH_CASE=1 跳过（不计 FAIL）
+
 ===== 汇总 =====
-PASS=7
+PASS=8
 FAIL=0
 SMOKE_DONE fail=0
 SSH 默认策略验证全部通过

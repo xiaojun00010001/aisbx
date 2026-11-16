@@ -15,6 +15,9 @@
 #   3. 查看 .ssh 下的文件（记录真实表现 + 标注与期望语义的差异）
 #   4. 访问 www.baidu.com（应被拒）
 #   5. 脚本内对「非工作空间目录」和「工作目录」分别读写
+#   6. 【失败 → 授权 → 成功访问】闭环（命中运行时审批能力）
+#      ⚠️ 运行时审批不是所有环境都能提供；设置 AISBX_SKIP_AUTH_CASE=1 可跳过该案例。
+#         跳过只记 NOTE，不计 FAIL —— 不强求全平台一致。
 #
 # 安全：所有测试都在 mktemp -d 的临时 HOME 中进行，**绝不触碰真实 ~/.ssh**。
 
@@ -137,6 +140,52 @@ if echo "$OUT5" | grep -q 'WS_READ=case2' \
   pass "脚本内:工作目录可读写、其他目录只读、tmp 可写"
 else
   bad "脚本内:工作目录可读写、其他目录只读、tmp 可写"
+fi
+
+hr "6. 失败 → 授权 → 成功访问（B 契约闭环）"
+if [[ "${AISBX_SKIP_AUTH_CASE:-0}" == "1" ]]; then
+  note "已按 AISBX_SKIP_AUTH_CASE=1 跳过：该环境不要求提供运行时审批能力"
+else
+  # 独立策略:prompt 模式(无 TTY → 交宿主授权闭环)
+  P2="$D/policy-auth.json"
+  printf '{"task":"ssh-auth-%s","filesystem":{"write":["%s","%s"],"read":[],"deny_escalation":[],"allow_escalation":[],"escalation":"prompt"},"network":{"loopback":true,"internet":false},"broker":{"audit_log":"%s/audit-auth.jsonl"}}' \
+    "$(date +%s)" "$WS" "$TMP" "$D" > "$P2"
+  TARGET="$OUT/after-auth.txt"
+  rm -f "$TARGET"
+
+  # 目标在只读目录 OUT 中 → 第一次写必然失败,程序主动 escalate 请求授权
+  # ⚠️ TMPDIR 必须与 run 一致,否则 status/authorize 连不上 broker 的 ctl.sock
+  HOME="$HOME_T" TMPDIR="$TMP" "$BIN" run -p "$P2" --json -- \
+    "$BURN" retryflow "$TARGET" grant > "$D/auth-run.out" 2>&1 &
+  RUN_PID=$!
+  sleep 2
+
+  EVID_FAIL=$(grep -E 'first_write=denied|"granted":false' "$D/auth-run.out" 2>/dev/null | head -2 | tr '\n' ' ')
+  echo "阶段1 失败: ${EVID_FAIL}" | tee -a "$LOG"
+
+  ST2=$(HOME="$HOME_T" TMPDIR="$TMP" "$BIN" status -p "$P2" 2>&1)
+  echo "阶段2 待授权: $(printf '%s' "$ST2" | head -c 220)" | tee -a "$LOG"
+  AUTH2=$(HOME="$HOME_T" TMPDIR="$TMP" "$BIN" authorize -p "$P2" --path "$OUT" --access write --ttl-seconds 120 2>&1)
+  echo "阶段2 授权: $(printf '%s' "$AUTH2" | head -c 220)" | tee -a "$LOG"
+
+  wait "$RUN_PID" 2>/dev/null
+  RC6=$?
+
+  EVID_OK=$(grep -E '"event":"retry"|wrote=ok|"attempt":2' "$D/auth-run.out" 2>/dev/null | head -4 | tr '\n' ' ')
+  echo "阶段3 成功: ${EVID_OK}" | tee -a "$LOG"
+  echo "阶段3 目标内容: $(cat "$TARGET" 2>/dev/null)" | tee -a "$LOG"
+
+  if printf '%s' "$EVID_FAIL" | grep -q 'first_write=denied' \
+     && printf '%s' "$ST2" | grep -q '"needs_approval":true' \
+     && printf '%s' "$AUTH2" | grep -q '"token"' \
+     && printf '%s' "$EVID_OK" | grep -q '"event":"retry"' \
+     && printf '%s' "$EVID_OK" | grep -q 'wrote=ok' \
+     && [[ -f "$TARGET" ]] && [[ "$(cat "$TARGET" 2>/dev/null)" == "x" ]]; then
+    pass "失败→授权→成功访问（只读目录内文件，授权后写入并读回成功）"
+  else
+    bad "失败→授权→成功访问闭环（rc=${RC6}，日志 ${D}/auth-run.out）"
+  fi
+  note "此案例依赖运行时审批闭环；不支持的环境设 AISBX_SKIP_AUTH_CASE=1 跳过（不计 FAIL）"
 fi
 
 # ── 汇总 ─────────────────────────────────────────────────────────────────
