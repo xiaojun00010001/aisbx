@@ -15,6 +15,8 @@ mod unix;
 #[cfg(windows)]
 mod win;
 
+use aisbx_protocol::{Access, EscalationRequest, Grant};
+use backend::{backend, backend_name, Backend};
 use common::load_policy;
 
 fn main() {
@@ -85,7 +87,7 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
             }
         }
         Some("--help") | Some("-h") | Some("help") | None => {
-            println!("aisbx - agent 本地沙箱 (后端: {})", backend::backend_name());
+            println!("aisbx - agent 本地沙箱 (后端: {})", backend().name());
             println!("  契约 B: 策略配置 → 拒绝感知 → 用户授权 → 重新执行");
             println!("  run / escalate / authorize / capabilities / policy-check");
             Ok(0)
@@ -141,24 +143,7 @@ fn cmd_run(args: &[String]) -> Result<i32, String> {
         capabilities::require_full(&report)?;
     }
 
-    #[cfg(windows)]
-    {
-        crate::run::run_windows(&policy, &policy_file, &cmd, json)
-    }
-    #[cfg(target_os = "linux")]
-    #[allow(clippy::needless_return)] // 同上:保留语义,只豁免 lint
-    {
-        return linux::run_linux(&policy, &policy_file, &cmd, json);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        macos::run_macos(&policy, &policy_file, &cmd, json)
-    }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (policy, json);
-        Err("该平台暂无沙箱后端".into())
-    }
+    backend().run(&policy, &policy_file, &cmd, json)
 }
 
 fn cmd_escalate(args: &[String]) -> Result<i32, String> {
@@ -183,40 +168,34 @@ fn cmd_escalate(args: &[String]) -> Result<i32, String> {
         .unwrap_or_default();
     let policy = load_policy(&policy_file)?;
 
-    #[cfg(windows)]
-    {
-        if op != "file" {
-            return Err("Windows 后端的 --op net CLI 尚未封装(见 docs/03 §2.2)".into());
-        }
-        crate::win::broker::escalate_client(&policy, &path, &access, &token)
+    // 平台差异在此**显式声明**，不再等 broker 运行时报错（docs/11 S3）。
+    if op == "net" && !backend().supports_net_escalation() {
+        return Err(format!(
+            "当前后端({})不支持 --op net；见 docs/03 §2.2",
+            backend_name()
+        ));
     }
-    #[cfg(unix)]
-    {
-        use crate::core::protocol::EscRequest;
-        let req = EscRequest {
-            op,
-            path,
-            access,
-            host: flag_value(args, "--host").unwrap_or_default(),
-            ip: flag_value(args, "--ip").unwrap_or_default(),
-            port: flag_value(args, "--port")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            token,
-            command_id: std::env::var("AISBX_COMMAND_ID").unwrap_or_default(),
-            pid: 0,
-            requested_by: serde_json::json!({
-                "pid": std::process::id(),
-                "exe": std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default()
-            }),
-        };
-        unix::broker::escalate_client(&policy, &req)
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = (policy, op, path, access, token);
-        Err("escalate 仅支持 Windows/Linux/macOS".into())
-    }
+
+    let req = EscalationRequest {
+        op,
+        path,
+        access,
+        host: flag_value(args, "--host").unwrap_or_default(),
+        ip: flag_value(args, "--ip").unwrap_or_default(),
+        port: flag_value(args, "--port")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        token,
+        command_id: std::env::var("AISBX_COMMAND_ID").unwrap_or_default(),
+        pid: 0,
+        requested_by: serde_json::json!({
+            "pid": std::process::id(),
+            "exe": std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default()
+        }),
+    };
+    // 底层 client 仍按原样把 broker 应答 JSON 打到 stdout（CLI 行为不变）。
+    let decision = backend().escalate(&policy, &req)?;
+    Ok(if decision.granted { 0 } else { 1 })
 }
 
 /// 宿主侧:agent 框架取得用户同意后调用,向运行中的 broker 签发一次性授权 token。
@@ -225,69 +204,41 @@ fn cmd_authorize(args: &[String]) -> Result<i32, String> {
     let policy = load_policy(&policy_file)?;
 
     // P0:放行代理真实观察到的网络目标(仅本次任务,运行中即时生效,不需重跑)。
-    if let Some(host) = flag_value(args, "--host") {
+    let grant = if let Some(host) = flag_value(args, "--host") {
         let port: u16 = flag_value(args, "--port")
             .and_then(|v| v.parse().ok())
             .unwrap_or(443);
         if host.is_empty() || port == 0 {
             return Err("--host/--port 非法".into());
         }
-        #[cfg(windows)]
-        {
-            return crate::win::netproxy::authorize_net_client(&policy, &host, port);
+        Grant::Net { host, port }
+    } else {
+        let path = flag_value(args, "--path").ok_or("缺少 --path 或 --host")?;
+        let access = flag_value(args, "--access").unwrap_or_else(|| "write".into());
+        if !matches!(access.as_str(), "read" | "write") {
+            return Err("--access 只允许 read|write".into());
         }
-        #[cfg(unix)]
-        {
-            return unix::broker::authorize_net_client(&policy, &host, port);
+        let ttl: u64 = flag_value(args, "--ttl-seconds")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        Grant::File {
+            path,
+            access: if access == "write" {
+                Access::Write
+            } else {
+                Access::Read
+            },
+            ttl_seconds: ttl,
         }
-        #[cfg(not(any(windows, unix)))]
-        {
-            let _ = (policy, host, port);
-            return Err("authorize --host 仅支持 Windows/Linux/macOS".into());
-        }
-    }
+    };
 
-    let path = flag_value(args, "--path").ok_or("缺少 --path 或 --host")?;
-    let access = flag_value(args, "--access").unwrap_or_else(|| "write".into());
-    if !matches!(access.as_str(), "read" | "write") {
-        return Err("--access 只允许 read|write".into());
-    }
-    let ttl: u64 = flag_value(args, "--ttl-seconds")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
-
-    #[cfg(windows)]
-    {
-        crate::win::broker::authorize_client(&policy, &path, &access, ttl)
-    }
-    #[cfg(unix)]
-    {
-        unix::broker::authorize_client(&policy, &path, &access, ttl)
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = (policy, path, access, ttl);
-        Err("authorize 仅支持 Windows/Linux/macOS".into())
-    }
+    backend().grant(&policy, &grant)
 }
 
 fn cmd_status(args: &[String]) -> Result<i32, String> {
     let policy_file = policy_arg(args)?;
     let policy = load_policy(&policy_file)?;
-    #[cfg(unix)]
-    {
-        println!("{}", unix::broker::status_client(&policy)?);
-        Ok(0)
-    }
-    #[cfg(windows)]
-    {
-        println!("{}", crate::win::broker::status_client(&policy)?);
-        Ok(0)
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = policy;
-        println!("{{\"backend\":\"unsupported\",\"status\":\"ok\"}}");
-        Ok(0)
-    }
+    let status = backend().status(&policy)?;
+    println!("{}", status.to_line());
+    Ok(0)
 }

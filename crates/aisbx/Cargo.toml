@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 aisbx-policy = { path = "../aisbx-policy" }
+aisbx-protocol = { path = "../aisbx-protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/aisbx-policy", "crates/aisbx"]
+members = ["crates/aisbx-policy", "crates/aisbx-protocol", "crates/aisbx"]
 
 [workspace.package]
 version = "0.1.0"
