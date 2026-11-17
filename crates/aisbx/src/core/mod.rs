@@ -3,6 +3,7 @@
 
 pub mod audit;
 pub mod decision;
+pub mod decision_engine;
 pub mod protocol;
 pub mod state;
 pub mod tokens;

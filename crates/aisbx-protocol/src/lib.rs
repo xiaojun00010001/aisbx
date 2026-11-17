@@ -196,7 +196,7 @@ impl EscalationRequest {
 }
 
 /// broker 的应答（与 `core/protocol.rs::Reply` 字段一致）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Decision {
     pub granted: bool,
     pub reason: String,
@@ -218,6 +218,11 @@ impl Decision {
     /// 而不是「拒绝」。对齐 `core/protocol.rs::needs_approval`。
     pub fn needs_approval(&self) -> bool {
         !self.granted && self.retry_required
+    }
+
+    /// 终态拒绝：granted=false 且不是 needs_approval。
+    pub fn denied_like(&self) -> bool {
+        !self.granted && !self.retry_required
     }
 
     pub fn granted(reason: &str) -> Self {
@@ -314,9 +319,88 @@ pub struct Capabilities {
     pub capabilities: serde_json::Value,
 }
 
+/// 结构化的能力分组视图（P0-d）：把平铺键按语义归类，便于 agent 按领域判断。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityGroups {
+    pub fs: FsCapabilities,
+    pub net: NetCapabilities,
+    pub resources: ResourceCapabilities,
+    pub detection: DetectionCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsCapabilities {
+    pub isolation: CapLevel,
+    pub authorized_retry: CapLevel,
+    pub launcher_retry: CapLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetCapabilities {
+    pub egress: CapLevel,
+    pub violation_capture: CapLevel,
+    /// 描述类：`http-connect+socks5` 或空串
+    pub proxy: String,
+    pub path_precision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceCapabilities {
+    pub memory_per_process: CapLevel,
+    pub memory_total: CapLevel,
+    pub cpu: CapLevel,
+    pub process_limit: CapLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectionCapabilities {
+    pub auto_violation: CapLevel,
+    pub file_path_precision: String,
+    pub log_probe: String,
+}
+
 impl Capabilities {
     pub fn parse(raw: &str) -> Result<Self, String> {
         serde_json::from_str(raw).map_err(|e| format!("能力报告解析失败: {e}"))
+    }
+
+    /// 把平铺能力键归类成结构化视图。
+    ///
+    /// 缺失或非法值一律降级为 `Unavailable`（fail-closed：不假装有能力）。
+    /// 与平铺视图同源，避免两份数据漂移。
+    pub fn groups(&self) -> CapabilityGroups {
+        let level = |k: &str| self.level(k).unwrap_or(CapLevel::Unavailable);
+        let desc = |k: &str| {
+            self.capabilities
+                .get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        CapabilityGroups {
+            fs: FsCapabilities {
+                isolation: level("file_isolation"),
+                authorized_retry: level("authorized_retry"),
+                launcher_retry: level("launcher_retry"),
+            },
+            net: NetCapabilities {
+                egress: level("network_egress"),
+                violation_capture: level("net_violation_capture"),
+                proxy: desc("net_proxy"),
+                path_precision: desc("violation_net_path_precision"),
+            },
+            resources: ResourceCapabilities {
+                memory_per_process: level("memory_per_process"),
+                memory_total: level("memory_total"),
+                cpu: level("cpu"),
+                process_limit: level("process_limit"),
+            },
+            detection: DetectionCapabilities {
+                auto_violation: level("auto_violation_capture"),
+                file_path_precision: desc("violation_file_path_precision"),
+                log_probe: desc("violation_log_probe"),
+            },
+        }
     }
 
     /// 读取某个能力项；缺失返回 `None`（契约要求键集合严格相等，缺失即破坏）。
@@ -440,6 +524,39 @@ mod tests {
         assert_eq!(c.level("net_proxy"), None); // 描述类键不是等级
         assert!(c.require_full(&["file_isolation"]).is_ok());
         assert!(c.require_full(&["cpu"]).is_err());
+    }
+
+    #[test]
+    fn capability_groups_from_flat_keys() {
+        let c = Capabilities::parse(
+            r#"{"backend":"macos","contract":"B","effect":"retry","capabilities":{
+                "file_isolation":"full","authorized_retry":"full","launcher_retry":"full",
+                "network_egress":"full","net_violation_capture":"partial",
+                "net_proxy":"http-connect+socks5","violation_net_path_precision":"exact",
+                "memory_per_process":"unavailable","memory_total":"unavailable",
+                "cpu":"unavailable","process_limit":"unavailable",
+                "auto_violation_capture":"partial","violation_file_path_precision":"exact",
+                "violation_log_probe":"sandbox-reporting-violation"}}"#,
+        )
+        .unwrap();
+        let g = c.groups();
+        assert_eq!(g.fs.isolation, CapLevel::Full);
+        assert_eq!(g.net.egress, CapLevel::Full);
+        assert_eq!(g.net.violation_capture, CapLevel::Partial);
+        assert_eq!(g.net.proxy, "http-connect+socks5");
+        assert_eq!(g.resources.cpu, CapLevel::Unavailable);
+        assert_eq!(g.detection.file_path_precision, "exact");
+    }
+
+    #[test]
+    fn capability_groups_missing_keys_are_unavailable() {
+        let c = Capabilities::parse(
+            r#"{"backend":"x","contract":"B","effect":"retry","capabilities":{}}"#,
+        )
+        .unwrap();
+        let g = c.groups();
+        assert_eq!(g.fs.isolation, CapLevel::Unavailable);
+        assert_eq!(g.resources.memory_total, CapLevel::Unavailable);
     }
 
     #[test]

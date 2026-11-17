@@ -33,6 +33,7 @@ pub struct Reply {
     pub retry_required: bool,
 }
 
+#[allow(dead_code)] // P0-c 过渡:Unix 已改用 decision_engine + Decision serde
 pub fn granted(reason: &str) -> String {
     serde_json::to_string(&Reply {
         granted: true,
@@ -54,6 +55,7 @@ pub fn denied(reason: &str) -> String {
 }
 
 /// 需要用户授权:不是「拒绝」,而是要求宿主 agent 拿到同意后再发起重执行。
+#[allow(dead_code)] // P0-c 过渡:Unix 已改用 decision_engine + Decision serde
 pub fn needs_approval(reason: &str) -> String {
     serde_json::to_string(&Reply {
         granted: false,

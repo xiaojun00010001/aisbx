@@ -229,6 +229,17 @@ fn kernel_at_least_5_13(release: &str) -> bool {
     major > 5 || (major == 5 && minor >= 13)
 }
 
+/// 结构化能力视图（`docs/11` P0-c）：给 agent 一个按领域归类的只读视图。
+///
+/// 与 `report()` 同源（从同一份平铺 JSON 派生），不引入第二份数据源；
+/// `aisbx capabilities` 的现有输出**不变**，agent 可按需要调用 `structured_view()`。
+#[allow(dead_code)] // CLI 尚未暴露 --structured（P1 再接），先提供库级 API
+pub fn structured_view() -> Result<aisbx_protocol::CapabilityGroups, String> {
+    let flat = report().to_string();
+    let parsed = aisbx_protocol::Capabilities::parse(&flat)?;
+    Ok(parsed.groups())
+}
+
 /// 严格模式:任何 unavailable 都拒绝启动(不降级为无约束执行)。
 pub fn require_full(report: &Value) -> Result<(), String> {
     let caps = report.get("capabilities").and_then(|v| v.as_object());

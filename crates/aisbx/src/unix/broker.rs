@@ -8,10 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aisbx_policy::{EscalationMode, Policy};
+use aisbx_policy::Policy;
 use serde_json::{json, Value};
 
 use crate::core::decision;
+use crate::core::decision_engine;
 use crate::core::protocol::{self, EscRequest};
 use crate::core::state::State;
 
@@ -191,106 +192,51 @@ fn handle_escalate(state: &Arc<Mutex<State>>, line: &str) -> String {
 }
 
 fn decide_file(s: &mut State, req: &EscRequest) -> String {
-    let path = decision::real_path(&req.path);
-
-    // 1) 不可授权黑名单:fail-closed,token 也救不回
-    if decision::is_prefix_hit(&s.policy.filesystem.deny_escalation, &path) {
-        s.violation(req, "file", "deny_escalation");
-        s.audit.log(&json!({
-            "event": "escalation.deny", "op": "file", "path": path,
-            "reason": "deny_escalation"
-        }));
-        return protocol::denied("路径在不可授权黑名单内");
-    }
-
-    // 2) token 快速路径:一次性消费,重放必拒
-    if !req.token.is_empty() {
-        return match s
-            .tokens
-            .redeem(&req.token, &path, &req.access, &s.command_id)
-        {
-            Ok(t) => {
-                s.widen(&t.path);
-                // 授权的文件可能尚不存在 → 预创建占位文件,否则 bwrap 绑不上
-                s.ensure_placeholder(&t.path);
-                s.audit.log(&json!({
-                    "event": "token.redeemed", "path": path, "access": req.access,
-                    "command_id": s.command_id
-                }));
-                protocol::granted("已按授权 token 放宽下一次执行策略")
-            }
-            Err(e) => {
-                s.audit
-                    .log(&json!({"event": "token.reject", "path": path, "reason": e}));
-                protocol::denied(&format!("授权 token 校验失败: {e}"))
-            }
-        };
-    }
-
-    // 3) 按模式裁决 —— 与 Windows 侧**同构**(win/broker.rs:517-549)。
-    //
-    // ⚠️ 这里曾经把「模式不允许」与「需要用户授权」压成同一个出口:
-    //   Deny / Auto 未命中 都落到 needs-approval 分支 → ①launcher 白等 20s、
-    //   ②退出码变成 3(等待授权超时)而非 1(被拒)、
-    //   ③审计里带 retry_required:true → 语义上等于「deny 模式也在邀请宿主授权」。
-    // 而契约写死的是(aisbx-policy/src/lib.rs:9-19):
-    //   Deny   = 一律拒绝(最严格)      → 不邀请宿主
-    //   Auto   = 按 allow 前缀放行,不在其中**一律拒绝** → 不邀请宿主
-    //   Prompt = 问用户;非 TTY 交宿主授权通道 → 只有它才邀请
-    let mode = s.policy.escalation_mode();
-    let granted = match mode {
-        EscalationMode::Deny => false,
-        EscalationMode::Auto => {
-            decision::is_prefix_hit(&s.policy.filesystem.allow_escalation, &path)
-        }
-        EscalationMode::Prompt => {
-            // 无交互终端(agent / CI)没法就地问人 → 交给宿主授权通道:
-            // 置 needs_approval,launcher 会等用户同意、并以更宽的策略快照重跑
-            // (B 契约,与 Windows 侧语义一致)。
-            if !decision::has_tty() {
-                s.violation(req, "file", "needs-approval");
-                s.audit.log(&json!({
-                    "event": "escalation.pending", "op": "file", "path": path,
-                    "reason": "needs-approval"
-                }));
-                return protocol::needs_approval("需要用户授权后重新执行");
-            }
-            // ⚠️ 有 TTY 时**真的问用户** —— 原来这里是「有 TTY 就静默放行」,
-            // 与 Windows 的 prompt_user 语义不同(那才是「问用户」)。
-            prompt_user(&format!(
-                "沙箱请求{}:{}\n同意? [y/N] ",
-                if req.access.eq_ignore_ascii_case("write") {
-                    "写入"
-                } else {
-                    "读取"
-                },
-                path
-            ))
-        }
+    // P0-c:裁决顺序由 core::decision_engine 唯一实现；这里只执行它给出的副作用。
+    let has_tty = decision::has_tty();
+    let command_id = s.command_id.clone();
+    let fr = decision_engine::FileRequest {
+        path: &req.path,
+        access: &req.access,
+        token: &req.token,
     };
+    let outcome = decision_engine::decide_file(
+        &s.policy,
+        &fr,
+        has_tty,
+        &mut |tok, p, access| {
+            let t = s.tokens.redeem(tok, p, access, &command_id)?;
+            Ok(decision_engine::TokenGrant {
+                path: t.path,
+                access: t.access,
+            })
+        },
+        &mut |msg| prompt_user(msg),
+    );
 
-    if !granted {
-        // 拒绝就只是拒绝:**不置 needs_approval**、**不带 retry_required**
-        // → 宿主不会因此被邀请去签 token → 模式的严格性得以保持。
-        // reason 用 policy-denied(≠ needs-approval)→ 不进 pending 列表:
-        // 策略已经定了的事,不该出现在「待用户授权」里(问了也是白问)。
-        s.violation(req, "file", "policy-denied");
-        s.audit.log(&json!({
-            "event": "escalation.deny", "op": "file", "path": path,
-            "reason": format!("{mode:?}:user-or-policy")
-        }));
-        return protocol::denied("授权被拒绝");
+    // 副作用 1:违规事件（pending 列表与 --json 事件流）
+    let reason = if outcome.mark_pending {
+        "needs-approval"
+    } else if outcome.decision.granted {
+        "granted"
+    } else {
+        "policy-denied"
+    };
+    s.violation(req, "file", reason);
+
+    // 副作用 2:审计事件（引擎按统一口径生成）
+    for ev in outcome.audits {
+        s.audit.log(&ev);
     }
 
-    // 4) 放行:授权的目标文件可能尚不存在 → 预创建空占位文件,
-    //    否则 bwrap 的 --bind 绑不上它(源路径必须存在)。
-    s.widen(&path);
-    s.ensure_placeholder(&path);
-    s.audit.log(&json!({
-        "event": "escalation.grant", "op": "file", "path": path,
-        "access": req.access, "reason": format!("{mode:?}")
-    }));
-    protocol::granted("策略已允许,下一次执行生效")
+    // 副作用 3:授权落地（Unix = 加宽策略快照 + 预创建占位文件）
+    if let Some((path, _write)) = outcome.grant_path {
+        s.widen(&path);
+        s.ensure_placeholder(&path);
+    }
+
+    // Decision 的 serde 字段与 protocol::* 完全一致（granted/reason/effect/retry_required）。
+    serde_json::to_string(&outcome.decision).unwrap_or_else(|_| protocol::denied("序列化失败"))
 }
 
 /// 终端问用户:与 Windows 侧 prompt_user(win/broker.rs:803)同构。
