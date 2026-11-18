@@ -724,3 +724,64 @@ proxy_status=200 target=example.com:443
 
 > 小结：**文件越界看 `needs_approval` + `pending` → 授权 → 重跑；网络越界看 `pending.kind=net` → 授权 → 不重跑；
 > 显式 deny 与 `deny` 模式没有授权入口，只能改策略重新发起。**
+
+---
+
+## 15. 高层授权接口（P1：status.id / approve / guard）
+
+> 2026-11-18 新增。解决「一次授权要 后台 run → 轮询 status → authorize → wait 四步」的易用性问题。
+> 旧命令（`authorize --path/--host`）完全保留，下面是可选的高层写法。
+
+### 15.1 `status` 直接给出可回填的授权参数
+
+```bash
+$ aisbx status -p policy.json
+{"attempt":1,"backend":"unix","granted_nets":[],"granted_paths":[],"needs_approval":true,
+ "pending":[{"access":"write","attributed":true,"host":"","kind":"file",
+             "path":"/tmp/x.txt","port":0,"precision":"reported","source":"explicit",
+             "id":"f-9a3c1d0e","grant":{"kind":"file","path":"/tmp/x.txt","access":"write","ttl_seconds":300}}],
+ "retries":0,"violations_total":2}
+```
+
+- `id`：按 `summary()` 内容 FNV 派生（不随 pending 顺序变化）。
+- `grant`：可直接消费的授权参数；agent 不再手工把 `path`/`access` 拼成 CLI 参数。
+- 两个字段都是**可选**（`skip_serializing_if`），旧 agent 忽略即可。
+
+### 15.2 `approve --pending <id>`：按 id 授权
+
+```bash
+aisbx approve -p policy.json --pending f-9a3c1d0e
+```
+
+流程：`status` → 按 id 查找 → 校验 `attributed=true`（未归属拒绝，见 §8）→ 复用 authorize 通道。
+若 id 已授权或任务已结束，返回明确错误并列出当前 pending ids。
+
+### 15.3 `guard`：一条命令完成「失败 → 授权 → 重跑」
+
+审批回调从 stdin 读一条 pending JSON，stdout 输出 `approve` 同意；其它一律拒绝（fail-closed）：
+
+```bash
+cat > /tmp/approver.sh <<'EOF'
+#!/bin/sh
+cat > /dev/null
+echo approve        # 生产环境按 JSON 内容自行决策
+EOF
+chmod +x /tmp/approver.sh
+
+aisbx guard -p policy.json --approve-cmd /tmp/approver.sh -- \
+  ./target/debug/examples/burn retryflow ./out/x.txt grant
+```
+
+实测输出（节选）：
+
+```text
+first_write=denied
+{"granted":false,"reason":"需要用户授权后重新执行","effect":"retry","retry_required":true}
+{"access":"write","granted":true,...}          # guard 自动调用审批回调
+{"event":"retry","from":1,"to":2,"reason":"user-approved"}
+wrote=ok
+```
+
+结果：`EXIT=0`、文件内容 `x`、token 重放仍被拒（`redeem=0 replay=1`）。
+
+**无 `--approve-cmd` 时退化为普通 run，不自动放行**（fail-closed）。

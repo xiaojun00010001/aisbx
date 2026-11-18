@@ -69,9 +69,10 @@ pub enum Effect {
 
 /// 一条待授权越界——`status.pending[]` 的元素。
 ///
-/// **刻意保持扁平**：字段与 `common/pending.rs::PendingViolation` 完全一致。
-/// 平台差异只体现在 `kind` 与哪些字段为空，调用方用 `kind` 判别，
-/// 不引入嵌套对象（那是 P1 的 `grant` 字段，见下文）。
+/// **保持扁平**：字段与 `common/pending.rs::PendingViolation` 完全一致。
+/// 平台差异只体现在 `kind` 与哪些字段为空，调用方用 `kind` 判别。
+/// P1 新增 `id` / `grant` 两个**可选**字段：agent 可直接拿 `grant` 回填 `approve`，
+/// 不必自己把 pending 映射成 CLI 参数；旧 agent 忽略这两个字段即可。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PendingViolation {
     /// `file` | `net`
@@ -85,6 +86,12 @@ pub struct PendingViolation {
     /// `exact` | `reported` | `none`
     pub precision: String,
     pub attributed: bool,
+    /// P1:稳定标识（按 pending 内容派生），供 `aisbx approve --pending <id>` 消费。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// P1:可直接回填 `approve` 的授权参数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<Grant>,
 }
 
 impl PendingViolation {
@@ -114,6 +121,28 @@ impl PendingViolation {
             Some(ViolationKind::Net) => format!("net {}:{}", self.host, self.port),
             None => format!("unknown violation: {}", self.kind),
         }
+    }
+
+    /// 按内容派生稳定 id（不依赖数组下标，避免 pending 顺序变化导致 id 漂移）。
+    /// 格式：`f-<hash>` / `n-<hash>`，8 位十六进制。
+    pub fn derive_id(&self) -> String {
+        // FNV-1a 64bit：无依赖、确定性足够（仅用于同一任务内区分 pending 项）。
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in self.summary().bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+        let prefix = match self.kind() {
+            Some(ViolationKind::File) => 'f',
+            Some(ViolationKind::Net) => 'n',
+            None => 'u',
+        };
+        format!("{prefix}-{h:08x}")
+    }
+
+    /// 生成可直接回填 `approve` 的授权参数（默认 TTL 300s）。
+    pub fn make_grant(&self, ttl: u64) -> Option<Grant> {
+        Grant::from_pending(self, ttl)
     }
 }
 
@@ -148,6 +177,25 @@ impl Status {
         self.pending
             .iter()
             .filter(|p| p.attributed && p.kind().is_some())
+    }
+
+    /// 为所有可操作项补上 `id` 与 `grant`（幂等；已有值不覆盖）。
+    /// 由 `aisbx status` 调用，让 agent 拿到即可直接授权。
+    pub fn with_ids_and_grants(mut self, ttl: u64) -> Self {
+        for p in &mut self.pending {
+            if p.id.is_empty() {
+                p.id = p.derive_id();
+            }
+            if p.grant.is_none() {
+                p.grant = p.make_grant(ttl);
+            }
+        }
+        self
+    }
+
+    /// 按 id 查找可操作项。
+    pub fn pending_by_id(&self, id: &str) -> Option<&PendingViolation> {
+        self.actionable_pending().find(|p| p.id == id)
     }
 
     /// 序列化为单行 JSON（保留字段顺序由 serde 决定，消费方按字段名取值）。

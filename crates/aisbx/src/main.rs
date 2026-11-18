@@ -32,6 +32,8 @@ fn main() {
             eprintln!("      aisbx escalate --op net --host <host> --ip <ip> --port <port>");
             eprintln!("      aisbx authorize -p <policy.json> --path <路径> --access read|write [--ttl-seconds 300]");
             eprintln!("      aisbx authorize -p <policy.json> --host <域名> [--port 443]  # 放行代理观察到的目标(仅本次任务)");
+            eprintln!("      aisbx status -p <policy.json>                       # 待授权项(含 id/grant,可直接 approve)");
+            eprintln!("      aisbx approve -p <policy.json> --pending <id>       # 按 status.pending[].id 授权(P1)");
             eprintln!("      aisbx capabilities [--json]");
             eprintln!("      aisbx policy-check -p <policy.json>");
             2
@@ -51,6 +53,8 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
         Some("run") => cmd_run(rest_after(args, 1)),
         Some("escalate") => cmd_escalate(rest_after(args, 1)),
         Some("authorize") => cmd_authorize(rest_after(args, 1)),
+        Some("approve") => cmd_approve(rest_after(args, 1)),
+        Some("guard") => cmd_guard(rest_after(args, 1)),
         Some("status") => cmd_status(rest_after(args, 1)),
         Some("__linux_helper") => {
             #[cfg(target_os = "linux")]
@@ -235,10 +239,118 @@ fn cmd_authorize(args: &[String]) -> Result<i32, String> {
     backend().grant(&policy, &grant)
 }
 
+/// 高层命令：把「起 run → 轮询 status → 授权 → 等重跑」收回沙箱内部。
+///
+/// 用法：`aisbx guard -p p.json --approve-cmd <exe> -- <cmd> [args...]`
+/// 审批回调从 stdin 读一条 pending JSON，stdout 输出 `approve` 表示同意，其它一律拒绝。
+/// 没有 --approve-cmd 时直接退化为普通 run（不自动放行，fail-closed）。
+fn cmd_guard(args: &[String]) -> Result<i32, String> {
+    let policy_file = policy_arg(args)?;
+    let sep = args
+        .iter()
+        .position(|a| a == "--")
+        .ok_or("缺少 -- <命令> 分隔符")?;
+    let cmd: Vec<String> = args[sep + 1..].to_vec();
+    if cmd.is_empty() {
+        return Err("沙箱内命令为空".into());
+    }
+    let approve_cmd = flag_value(args, "--approve-cmd");
+    let policy = load_policy(&policy_file)?;
+
+    // 无审批回调：不自动放行（fail-closed），退化为普通 run。
+    let Some(approve_cmd) = approve_cmd else {
+        return backend().run(&policy, &policy_file, &cmd, false);
+    };
+
+    // 后台起 run，主线程轮询 status 并按回调决策。
+    let run_args = args.to_vec();
+    let run_policy_file = policy_file.clone();
+    let child = std::thread::spawn(move || {
+        // 子线程重新加载策略（&Policy 不能跨线程），只执行 run（不带 guard 专属参数）
+        let p = match load_policy(&run_policy_file) {
+            Ok(p) => p,
+            Err(e) => return Err(e),
+        };
+        let sep = run_args.iter().position(|a| a == "--").unwrap_or(0);
+        let run_cmd: Vec<String> = run_args[sep + 1..].to_vec();
+        backend().run(&p, &run_policy_file, &run_cmd, false)
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut approved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    while std::time::Instant::now() < deadline && !child.is_finished() {
+        if let Ok(st) = backend().status(&policy) {
+            let st = st.with_ids_and_grants(300);
+            for p in st.actionable_pending() {
+                if p.id.is_empty() || approved.contains(&p.id) {
+                    continue;
+                }
+                let input = serde_json::to_string(p).unwrap_or_default();
+                let mut child_proc = std::process::Command::new(&approve_cmd)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("启动审批回调失败: {e}"))?;
+                if let Some(mut si) = child_proc.stdin.take() {
+                    use std::io::Write;
+                    let _ = writeln!(si, "{input}");
+                }
+                let out = child_proc
+                    .wait_with_output()
+                    .map_err(|e| format!("审批回调执行失败: {e}"))?;
+                let verdict = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if verdict == "approve" {
+                    if let Some(g) = p.grant.clone().or_else(|| p.make_grant(300)) {
+                        let _ = backend().grant(&policy, &g);
+                    }
+                    approved.insert(p.id.clone());
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Ok(child.join().unwrap_or(Ok(1)).unwrap_or(1))
+}
+
 fn cmd_status(args: &[String]) -> Result<i32, String> {
     let policy_file = policy_arg(args)?;
     let policy = load_policy(&policy_file)?;
-    let status = backend().status(&policy)?;
+    // P1:为每条 pending 补 id / grant，agent 可直接拿去 approve。
+    // 旧字段与取值不变；新字段用 skip_serializing_if 避免给空 pending 增噪。
+    let status = backend().status(&policy)?.with_ids_and_grants(300);
     println!("{}", status.to_line());
     Ok(0)
+}
+
+/// 按 `status.pending[].id` 授权——agent 不必自己把 pending 映射成 --path/--host。
+///
+/// 流程：status(补 id/grant) → 按 id 查找 → 校验 attributed（未归属不授权）
+/// → 调 backend().grant。不引入新的 broker 协议，复用 authorize 通道。
+fn cmd_approve(args: &[String]) -> Result<i32, String> {
+    let policy_file = policy_arg(args)?;
+    let id = flag_value(args, "--pending")
+        .ok_or("缺少 --pending <id>（id 来自 `aisbx status` 的 pending[].id）")?;
+    let policy = load_policy(&policy_file)?;
+    let status = backend().status(&policy)?.with_ids_and_grants(300);
+    let p = status.pending_by_id(&id).ok_or_else(|| {
+        format!(
+            "找不到待授权项 {id}（可能已被授权/任务已结束）；当前 pending: {:?}",
+            status
+                .pending
+                .iter()
+                .map(|x| x.id.as_str())
+                .collect::<Vec<_>>()
+        )
+    })?;
+    if !p.attributed {
+        return Err(format!(
+            "待授权项 {id} 未能归属到本次执行，拒绝授权（见 docs/08 §3.5）"
+        ));
+    }
+    let grant = p
+        .grant
+        .clone()
+        .or_else(|| p.make_grant(300))
+        .ok_or_else(|| format!("待授权项 {id} 无法生成授权参数"))?;
+    backend().grant(&policy, &grant)
 }
