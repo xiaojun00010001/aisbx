@@ -652,10 +652,57 @@ try {
     Assert "T14a status 给出待授权的具体路径" ($st14 -match [regex]::Escape($t14leaf))
     Assert "T14b status 标注路径精度与归属" ($st14 -match 'reported|exact')
     Assert "T14c status 报告 needs_approval 标志" ($st14 -match 'needs[-_]approval')
+
+    # ── T16 P1 高层授权接口:status.pending[].id / grant + approve --pending ──
+    $id16 = ""
+    try {
+      $obj16 = $st14 | ConvertFrom-Json
+      if ($obj16.pending -and $obj16.pending.Count -gt 0) { $id16 = [string]$obj16.pending[0].id }
+    } catch {}
+    Assert "T16a status.pending[] 带稳定 id" (-not [string]::IsNullOrEmpty($id16))
+    Assert "T16b status.pending[] 带可回填 grant" ($st14 -match '"grant"')
+    if (-not [string]::IsNullOrEmpty($id16)) {
+      $ap16 = (& $bin approve -p $p14 --pending $id16 | Out-String)
+      Assert "T16c approve --pending 按 id 授权成功" ($LASTEXITCODE -eq 0)
+      Assert "T16d approve 授予 pending 声明的路径" ($ap16 -match '"granted"\s*:\s*true')
+      $rp16 = (& $bin approve -p $p14 --pending "f-nonexistent" 2>&1 | Out-String)
+      Assert "T16e approve 拒绝不存在的 id(fail-closed)" ($LASTEXITCODE -ne 0)
+    }
     if (-not $proc14.WaitForExit(20000)) { $proc14.Kill() }
     } catch {
       Warn "T14 段异常: $_"
       $script:rows += "| T14 段异常(未跑完) | **FAIL** |"
+      $script:fail++
+    }
+
+    # ── T17 guard 高层命令:一条命令完成 失败→自动审批→授权→重跑 ──
+    try {
+    Push-Progress "T17"
+    Write-Host "[$(Get-Date -Format HH:mm:ss)] == T17 guard 自动授权闭环 =="
+    $p17 = Join-Path $root "p17.json"; $a17 = Join-Path $root "p17.audit.jsonl"
+    @{
+      task       = "smoke17-$PID"
+      filesystem = @{ write = @($ws); read = @(); deny_escalation = @()
+                      allow_escalation = @(); escalation = "prompt" }
+      network    = @{ loopback = $true; internet = $false }
+      resources  = @{}
+      broker     = @{ audit_log = $a17; violation_capture = $true }
+    } | ConvertTo-Json -Depth 5 | Set-Content $p17 -Encoding UTF8
+    $approver = Join-Path $root "t17.approver.cmd"
+    "@echo off`nmore > nul`necho approve" | Set-Content $approver -Encoding ASCII
+    $t17target = Join-Path $out "t17.txt"
+    $r17 = (& $bin guard -p $p17 --approve-cmd $approver -- `
+             "$ws\burn.exe" retryflow $t17target grant | Out-String)
+    Assert "T17a guard 一条命令完成闭环(exit=0)" ($LASTEXITCODE -eq 0)
+    Assert "T17b guard 授权后文件真实落盘" (Test-Path $t17target)
+    Assert "T17c guard 触发了 retry 事件" `
+      ((Test-Path $a17) -and (Select-String -Path $a17 -Pattern '"event":"retry"' -Quiet))
+    $t17deny = Join-Path $out "t17_deny.txt"
+    $null = (& $bin guard -p $p17 -- "$ws\burn.exe" retryflow $t17deny grant | Out-String)
+    Assert "T17d guard 无审批回调不自动放行" (-not (Test-Path $t17deny))
+    } catch {
+      Warn "T17 段异常: $_"
+      $script:rows += "| T17 段异常(未跑完) | **FAIL** |"
       $script:fail++
     }
 

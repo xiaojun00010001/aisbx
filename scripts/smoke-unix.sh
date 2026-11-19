@@ -710,9 +710,65 @@ printf '%s' "$T14_STATUS" > "$ROOT/t14.status"
 assert "T14a status 给出待授权的具体路径" grep -q 't14.txt' "$ROOT/t14.status"
 assert "T14b status 标注路径精度与归属" grep -q '"precision"' "$ROOT/t14.status"
 assert "T14c status 报告 needs_approval 标志" grep -q '"needs_approval":true' "$ROOT/t14.status"
+
+# T16 P1 高层授权接口:status.pending[].id / grant + approve --pending
+# ——agent 不必自己把 pending 映射成 --path/--host(易用性优化 docs/11 P1)。
+T16_ID=$(printf '%s' "$T14_STATUS" | python3 -c 'import json,sys
+try:
+  d=json.load(sys.stdin)
+  p=(d.get("pending") or [{}])[0]
+  print(p.get("id",""))
+except Exception: print("")' 2>/dev/null)
+assert "T16a status.pending[] 带稳定 id" test -n "$T16_ID"
+assert "T16b status.pending[] 带可回填 grant" \
+  bash -c "printf '%s' '$T14_STATUS' | grep -q '\"grant\"'"
+# approve 按 id 授权(未归属项会拒绝,这里 T14 的 pending 已归属)
+APPROVE_OUT=$("$BIN" approve -p "$P14" --pending "$T16_ID" 2>&1); APPROVE_RC=$?
+printf '%s\n' "$APPROVE_OUT" >> "$LOG"
+assert "T16c approve --pending 按 id 授权成功" test "$APPROVE_RC" -eq 0
+assert "T16d approve 授予的是 pending 声明的路径" \
+  bash -c "printf '%s' '$APPROVE_OUT' | grep -q '\"granted\":true'"
+# 不存在的 id 必须被拒(fail-closed:不接受凭空的授权目标)
+"$BIN" approve -p "$P14" --pending "f-nonexistent" >"$ROOT/t16.badid.out" 2>&1
+assert "T16e approve 拒绝不存在的 id(fail-closed)" \
+  grep -q '找不到待授权项' "$ROOT/t16.badid.out"
+
 "$BIN" authorize -p "$P14" --path "$OUT" --access write >>"$LOG" 2>&1
 wait "$T14_PID"
 cat "$ROOT/t14.out" >> "$LOG"
+
+# T17 guard 高层命令:一条命令内完成 失败→自动审批→授权→重跑
+# ——审批回调 stdin 收 pending JSON,stdout 输出 approve 同意;其它拒绝(fail-closed)。
+echo "[$(date +%H:%M:%S)] == T17 guard 自动授权闭环 ==" | tee -a "$LOG"
+P17="$ROOT/p17.json"; A17="$ROOT/p17.audit.jsonl"; TASK17="smoke17-$$"
+python3 - "$P17" "$WS" "$A17" "$TASK17" <<'PYJ'
+import json, sys
+policy, ws, audit, task = sys.argv[1:]
+json.dump({
+    "task": task,
+    "filesystem": {"write": [ws], "read": [], "deny_escalation": [],
+                   "allow_escalation": [], "escalation": "prompt"},
+    "network": {"loopback": True, "internet": False},
+    "resources": {},
+    "broker": {"audit_log": audit, "violation_capture": True},
+}, open(policy, "w"), indent=2)
+PYJ
+APPROVER="$ROOT/t17.approver.sh"
+printf '#!/bin/sh\ncat > /dev/null\necho approve\n' > "$APPROVER"; chmod +x "$APPROVER"
+T17_TARGET="$OUT/t17.txt"
+"$BIN" guard -p "$P17" --approve-cmd "$APPROVER" -- \
+  "$BURN" retryflow "$T17_TARGET" grant >"$ROOT/t17.out" 2>&1
+T17_RC=$?
+cat "$ROOT/t17.out" >> "$LOG"
+assert "T17a guard 一条命令完成闭环(exit=0)" test "$T17_RC" -eq 0
+assert "T17b guard 授权后文件真实落盘" test -f "$T17_TARGET"
+assert "T17c guard 触发了 retry 事件" grep -q '"event":"retry"' "$A17"
+# 无审批回调时不得自动放行(fail-closed)
+T17_DENY_TARGET="$OUT/t17_deny.txt"
+"$BIN" guard -p "$P17" -- "$BURN" retryflow "$T17_DENY_TARGET" grant \
+  >"$ROOT/t17.nocb.out" 2>&1
+assert "T17d guard 无审批回调不自动放行" \
+  bash -c "! test -f '$T17_DENY_TARGET'"
 
 # T15 对抗用例:程序【自称】一个无害路径,却【真实访问】另一个路径。
 #   - L2(内核日志,仅 macOS):应采到**真实被拒路径**(内核不受欺骗)→ precision=exact
