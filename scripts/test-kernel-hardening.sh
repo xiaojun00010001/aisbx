@@ -82,7 +82,8 @@ else
 fi
 sed -n '/== unshare ==/{n;p;}' "$PROBE" | grep -qi 'not permitted\|Operation not permitted' \
   && ok "unshare 被 seccomp 拒绝（防自我换 namespace）" || bad "unshare 被拒绝"
-sed -n '/== mount ==/{n;p;}' "$PROBE" | grep -qi 'not permitted\|permission denied' \
+# 拒绝措辞随环境不同:特权容器=permission denied;GitHub runner=must be superuser
+sed -n '/== mount ==/{n;p;}' "$PROBE" | grep -qi 'not permitted\|permission denied\|must be superuser\|operation not permitted' \
   && ok "mount 被拒绝（防拆只读 bind）" || bad "mount 被拒绝"
 
 echo "===== 汇总 ====="
