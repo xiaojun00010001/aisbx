@@ -34,6 +34,7 @@ fn main() {
             eprintln!("      aisbx authorize -p <policy.json> --host <域名> [--port 443]  # 放行代理观察到的目标(仅本次任务)");
             eprintln!("      aisbx status -p <policy.json>                       # 待授权项(含 id/grant,可直接 approve)");
             eprintln!("      aisbx approve -p <policy.json> --pending <id>       # 按 status.pending[].id 授权(P1)");
+            eprintln!("      aisbx guard -p <policy.json> --approve-cmd <exe> -- <命令>  # 一条命令完成失败→授权→重跑(P1)");
             eprintln!("      aisbx capabilities [--json]");
             eprintln!("      aisbx policy-check -p <policy.json>");
             2
@@ -93,7 +94,7 @@ fn dispatch(args: &[String]) -> Result<i32, String> {
         Some("--help") | Some("-h") | Some("help") | None => {
             println!("aisbx - agent 本地沙箱 (后端: {})", backend().name());
             println!("  契约 B: 策略配置 → 拒绝感知 → 用户授权 → 重新执行");
-            println!("  run / escalate / authorize / capabilities / policy-check");
+            println!("  run / escalate / authorize / status / approve / guard / capabilities / policy-check");
             Ok(0)
         }
         Some(other) => Err(format!("未知子命令 {other}")),

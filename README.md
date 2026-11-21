@@ -74,6 +74,7 @@ CI：`.github/workflows/windows-smoke.yml`（Windows 真机冒烟）与
 - [docs/10-业界沙箱能力矩阵与易用性对比分析.md](docs/10-业界沙箱能力矩阵与易用性对比分析.md) — 五类开源沙箱的能力矩阵 / 易用性评分 / aisbx 差距清单与选型建议
 - [docs/11-易用性优化方案.md](docs/11-易用性优化方案.md) — 三平台同一层 / 对外交互层的重构方案（P0 强类型协议 + Backend trait 已实施）
 - [docs/12-内核加固改进计划.md](docs/12-内核加固改进计划.md) — 基于 sandbox-lab-manual 对比的内核加固（cap-drop / seccomp / PID 视图）
+- [docs/13-脚本交互使用指南.md](docs/13-脚本交互使用指南.md) — **脚本/agent 集成指南：guard / status+approve / authorize 三层交互**
 - `scripts/test-ssh-policy.sh` — SSH 默认策略专项测试（工作目录读写 / 只读目录 / `.ssh` / 外网 / 脚本内混合读写）
 - `scripts/test-kernel-hardening.sh` — 内核加固探针（NoNewPrivs / CapEff / Seccomp / namespace / 逃逸 syscall，Linux only）
 - `scripts/test-long-running.sh` — 后台/长期运行服务测试（启动 / status / 回环访问 / 正确停止）
