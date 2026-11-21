@@ -23,9 +23,13 @@ if [[ "$UNAME" != "Linux" || ! -x "$BIN" || ! -x "$BURN" || ! -x "$(command -v b
   echo "SKIP=all"
   exit 0
 fi
-# bwrap 在非特权命名空间环境会失败;探测一次,失败则整体跳过
-if ! bwrap --unshare-user --ro-bind / / --dev /dev true >/dev/null 2>&1; then
-  echo "当前环境不允许在 userns 内 remount（嵌套容器/WSL/AppArmor）→ 跳过"
+# bwrap 探测必须用与实际 run **完全相同的参数**（--proc / --cap-drop）:
+# GitHub-hosted runner 常禁止 --proc /proc 或 cap-drop,旧参数探测通过但
+# 实际 run 失败 → 空 PROBE → 假 FAIL。这里探测失败就 SKIP,不强求环境能力。
+if ! bwrap --ro-bind / / --tmpfs /tmp --dev /dev \
+     --unshare-user --unshare-pid --proc /proc --unshare-net \
+     --disable-userns --cap-drop ALL --clearenv true >/dev/null 2>&1; then
+  echo "当前环境不支持完整加固参数（--proc / --cap-drop / userns）→ 跳过"
   echo "SKIP=all"
   exit 0
 fi
@@ -53,6 +57,11 @@ PROBE="$OUT/probe.txt"
   mount -t tmpfs none /tmp 2>&1 | head -1
 ' > "$PROBE" 2>&1
 cat "$PROBE"
+if ! grep -q '== status ==' "$PROBE"; then
+  echo "沙箱内探针未执行（run 被环境拒绝）→ 跳过，不计 FAIL"
+  echo "SKIP=all"
+  exit 0
+fi
 
 HOST_MNT=$(readlink /proc/self/ns/mnt)
 echo "宿主 mnt-ns=$HOST_MNT"
