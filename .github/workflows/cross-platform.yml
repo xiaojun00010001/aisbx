@@ -53,7 +53,7 @@ jobs:
       - name: Kernel hardening probe (Linux only)
         if: runner.os == 'Linux'
         shell: bash
-        run: bash scripts/test-kernel-hardening.sh 2>&1 | tee kernel-hardening.log
+        run: bash scripts/test-kernel-hardening.sh 2>&1 | tee -a smoke.log kernel-hardening.log
 
       # ── 门禁后置:红了不影响上面已拿到的冒烟结果 ──────────────────────
       - name: Format check
