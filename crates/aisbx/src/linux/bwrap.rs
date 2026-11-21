@@ -38,8 +38,17 @@ pub fn argv(policy: &Policy, cmd: &[String], ctx: &RunCtx) -> Result<Vec<String>
         "/dev".into(),
         "--unshare-user".into(), // --disable-userns 依赖 user namespace
         "--unshare-pid".into(),
+        // docs/12 A3:新 PID namespace 必须配新 /proc,否则 ps 仍列宿主全部进程。
+        // 受限容器(嵌套 Docker / WSL1)不支持时 bwrap 会启动失败 → 由 run 层
+        // 的 fail-closed 处理(不裸跑),不静默降级为旧 /proc 视图。
+        "--proc".into(),
+        "/proc".into(),
         "--unshare-net".into(), // 外网默认全断;helper 里把 lo 置 up 放行回环
         "--disable-userns".into(), // 防沙箱内自建 userns 后 mount/umount 拆掉只读 bind
+        // docs/12 A1:卸全部 capability;bwrap 同时设置 no_new_privs。
+        // 内核证据 CapEff=0 / NoNewPrivs=1 由 test-kernel-hardening.sh 断言。
+        "--cap-drop".into(),
+        "ALL".into(),
         "--clearenv".into(),
     ];
 

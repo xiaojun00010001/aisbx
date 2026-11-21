@@ -48,6 +48,13 @@ jobs:
         shell: bash
         run: bash scripts/smoke-unix.sh 2>&1 | tee smoke.log
 
+      # docs/12 A8:内核加固探针(CapEff/NoNewPrivs/Seccomp/PID 视图/逃逸 syscall)。
+      # 仅 Linux 跑;脚本内部对无 userns 权限的环境自行 SKIP,不计 FAIL。
+      - name: Kernel hardening probe (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash scripts/test-kernel-hardening.sh 2>&1 | tee kernel-hardening.log
+
       # ── 门禁后置:红了不影响上面已拿到的冒烟结果 ──────────────────────
       - name: Format check
         if: always()   # 冒烟失败也要跑:否则看不到门禁本身是否也坏

@@ -192,7 +192,9 @@ pub fn report() -> Value {
                 "violation_log_probe": "",
                 "bubblewrap": if bwrap { "full" } else { "unavailable" },
                 "landlock": if landlock { "partial" } else { "unavailable" },
-                "seccomp": if bwrap { "partial" } else { "unavailable" },
+                // docs/12 A2:helper 内在 exec 前安装 BPF(unshare/setns/mount/
+                // umount2/pivot_root/io_uring/AF_VSOCK),随 exec 继承不可逆。
+                "seccomp": if bwrap { "full" } else { "unavailable" },
                 "seatbelt": "unavailable"
             }
         })

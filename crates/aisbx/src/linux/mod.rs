@@ -2,6 +2,7 @@
 
 pub mod bwrap;
 pub mod helper;
+pub mod seccomp;
 
 use aisbx_policy::Policy;
 

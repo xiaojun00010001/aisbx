@@ -66,6 +66,12 @@ pub fn entry(args: &[String]) -> Result<i32, String> {
 
     // exec 后 PID 不变,内核日志里的 PID 就是沙箱入口 PID。
     report_pid(&broker_dir, &command_id, std::process::id());
+
+    // docs/12 A2:relay 子进程已启动(它不受下面的过滤器约束,需要 socket()),
+    // 现在为即将 exec 的目标安装 seccomp。失败即 fail-closed,不裸跑目标。
+    #[cfg(target_os = "linux")]
+    crate::linux::seccomp::install()?;
+
     let err = Command::new(&cmd[0]).args(&cmd[1..]).exec();
     Err(format!("exec {} 失败: {err}", cmd[0]))
 }
