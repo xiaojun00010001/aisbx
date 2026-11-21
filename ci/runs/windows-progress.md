@@ -33,3 +33,4 @@
 - contract @ 03:20:17
 - contract/caps @ 03:20:18
 - contract/run @ 03:20:19
+- contract/check @ 03:20:43
